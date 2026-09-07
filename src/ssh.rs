@@ -324,7 +324,7 @@ fn resolve_askpass(prompt: &str, creds: &[AskpassCred]) -> String {
 const LEGACY_BEGIN: &str = "# === drilla: legacy ssh algorithms (managed) ===";
 const LEGACY_END: &str = "# === end drilla legacy ===";
 
-const LEGACY_HOST_LINES: &str = "  HostKeyAlgorithms +ssh-rsa,ssh-dss\n  PubkeyAcceptedAlgorithms +ssh-rsa\n  KexAlgorithms +diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1\n  Ciphers +3des-cbc,aes128-cbc,aes192-cbc,aes256-cbc\n  MACs +hmac-sha1,hmac-md5\n";
+const LEGACY_HOST_LINES: &str = "  HostKeyAlgorithms +ssh-rsa,ssh-dss\n  PubkeyAcceptedAlgorithms +ssh-rsa\n  KexAlgorithms +diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1\n  Ciphers +3des-cbc,aes128-cbc,aes192-cbc,aes256-cbc\n  MACs +hmac-sha1,hmac-md5\n  StrictHostKeyChecking no\n  UserKnownHostsFile NUL\n";
 
 pub fn default_config_path() -> PathBuf {
     if let Ok(home) = std::env::var("USERPROFILE") {
@@ -703,6 +703,8 @@ mod tests {
         assert!(content.contains("Host hopB"), "{content}");
         assert_eq!(content.matches("Host hopA1").count(), 1, "{content}");
         assert!(content.contains("HostKeyAlgorithms +ssh-rsa,ssh-dss"), "{content}");
+        assert!(content.contains("StrictHostKeyChecking no"), "{content}");
+        assert!(content.contains("UserKnownHostsFile NUL"), "{content}");
 
         // Clearing removes both entries but preserves user content.
         fs::write(&path, "# user stuff\nbefore\n").unwrap();
@@ -742,6 +744,8 @@ mod tests {
         assert!(content.contains("Host 172.30.110.4"), "{content}");
         assert!(content.contains("Host 10.200.10.140"), "{content}");
         assert!(content.contains("HostKeyAlgorithms +ssh-rsa,ssh-dss"), "{content}");
+        assert!(content.contains("StrictHostKeyChecking no"), "{content}");
+        assert!(content.contains("UserKnownHostsFile NUL"), "{content}");
 
         // The block is present while the tunnel is "running".
         manager.stop("legacy1").ok();
