@@ -31,6 +31,7 @@ fn main() -> io::Result<()> {
 
     let mut app = App::new();
     let result = run(&mut terminal, &mut app);
+    app.ssh.clear_legacy_block();
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
