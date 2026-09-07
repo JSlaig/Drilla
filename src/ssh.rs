@@ -284,6 +284,30 @@ fn option_args(opts: &[String]) -> Vec<String> {
     args
 }
 
+/// Render the options as a single command-line fragment like
+/// `-o StrictHostKeyChecking=accept-new -o ...`, used inside the nested
+/// ProxyCommand string for legacy tunnels.
+fn option_arg_string(opts: &[String]) -> String {
+    let mut s = String::new();
+    for o in opts {
+        s.push_str(" -o ");
+        s.push_str(o);
+    }
+    s
+}
+
+fn jump_string(jump: &JumpHost) -> String {
+    if jump.port == 0 || jump.port == 22 {
+        if jump.user.is_empty() {
+            jump.host.clone()
+        } else {
+            format!("{}@{}", jump.user, jump.host)
+        }
+    } else {
+        format!("{}@{}:{}", jump.user, jump.host, jump.port)
+    }
+}
+
 /// `user@host` (or bare host) for a jump, ports used via `-p` on the command
 /// line because Windows OpenSSH mishandles the `user@host:port` form inside
 /// ProxyCommand strings.
@@ -295,33 +319,26 @@ fn jump_target_arg(jump: &JumpHost) -> String {
     }
 }
 
-/// Build a nested `ssh -W` chain string that replaces `-J`.
+/// Build a nested `ssh -W` chain string that replaces `-J`, used only when the
+/// tunnel is `legacy`.
 ///
 /// OpenSSH's `-J` negotiates each jump from a nested `ssh -W` process, and
 /// those nested processes ignore command-line `-o` options (only the ssh
 /// config file reaches them), so legacy `HostKeyAlgorithms` etc. never applied
 /// to the middle hops. Here we build the chain ourselves so every hop is
-/// negotiated by a local ssh with our options inline.
-fn proxy_chain(tunnel: &Tunnel) -> Option<String> {
-    if tunnel.jumps.is_empty() {
+/// negotiated by a local ssh with our options inline. Non-legacy tunnels keep
+/// using plain `-J` (clean, standard behavior).
+fn proxy_chain(prefix: &str, jumps: &[JumpHost]) -> Option<String> {
+    if jumps.is_empty() {
         return None;
     }
-    let opts = base_options(tunnel);
-    let prefix = {
-        let mut s = String::from("ssh");
-        for o in &opts {
-            s.push_str(" -o ");
-            s.push_str(o);
-        }
-        s
-    };
-    let mut chain = format!("{} -W %h:%p {}", prefix, jump_target_arg(&tunnel.jumps[0]));
-    for j in tunnel.jumps.iter().skip(1) {
+    let mut chain = format!("{prefix} -W %h:%p {}", jump_target_arg(&jumps[0]));
+    for j in jumps.iter().skip(1) {
         let mut target = jump_target_arg(j);
         if j.port != 0 && j.port != 22 {
             target = format!("{} -p {}", target, j.port);
         }
-        chain = format!("{} -o ProxyCommand=\"{}\" -W %h:%p {}", prefix, chain, target);
+        chain = format!("{prefix} -o ProxyCommand=\"{}\" -W %h:%p {}", chain, target);
     }
     Some(chain)
 }
@@ -334,8 +351,21 @@ pub fn build_ssh_command(tunnel: &Tunnel) -> Command {
         cmd.arg(o);
     }
 
-    if let Some(chain) = proxy_chain(tunnel) {
-        cmd.arg("-o").arg(format!("ProxyCommand={chain}"));
+    if tunnel.legacy {
+        // Legacy options must reach every hop; `-J` can't (nested ssh `-W`
+        // processes ignore command-line -o). Build the jump chain explicitly
+        // so each leg is negotiated by a local ssh with our options.
+        if let Some(chain) = proxy_chain(&format!("ssh{}", option_arg_string(&opts)), &tunnel.jumps) {
+            cmd.arg("-o").arg(format!("ProxyCommand={chain}"));
+        }
+    } else if !tunnel.jumps.is_empty() {
+        // Standard, well-tested `-J` for everything else.
+        let jumps: Vec<String> = tunnel
+            .jumps
+            .iter()
+            .map(jump_string)
+            .collect();
+        cmd.arg("-J").arg(jumps.join(","));
     }
 
     let target_port = if tunnel.target.port == 0 {
@@ -424,27 +454,55 @@ mod tests {
         };
 
         let args = cmd_to_args(&build_ssh_command(&tunnel));
-        let prefix = "ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15";
-        let inner = format!("{prefix} -W %h:%p alice@jump1.example.com");
-        let level2 = format!(
-            "{prefix} -o ProxyCommand=\"{inner}\" -W %h:%p bob@jump2.example.com -p 2222"
+        assert_eq!(
+            args,
+            vec![
+                "ssh",
+                "-N",
+                "-T",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "ConnectTimeout=15",
+                "-J",
+                "alice@jump1.example.com,bob@jump2.example.com:2222,jump3.example.com",
+                "-L5433:db.internal:5432",
+                "alice@jump1.example.com"
+            ]
         );
-        let level3 =
-            format!("{prefix} -o ProxyCommand=\"{level2}\" -W %h:%p jump3.example.com");
-        let expected = vec![
-            "ssh".to_string(),
-            "-N".to_string(),
-            "-T".to_string(),
-            "-o".to_string(),
-            "StrictHostKeyChecking=accept-new".to_string(),
-            "-o".to_string(),
-            "ConnectTimeout=15".to_string(),
-            "-o".to_string(),
-            format!("ProxyCommand={level3}"),
-            "-L5433:db.internal:5432".to_string(),
-            "alice@jump1.example.com".to_string(),
-        ];
-        assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn legacy_jump_uses_nested_proxy_chain() {
+        let tunnel = Tunnel {
+            name: "legacy".into(),
+            jumps: vec![
+                jump("alice", "jump1.example.com", 22, None),
+                jump("bob", "jump2.example.com", 2222, None),
+            ],
+            target: Target {
+                host: "db.internal".into(),
+                port: 5432,
+                password: None,
+            },
+            local_port: 5433,
+            legacy: true,
+        };
+
+        let args = cmd_to_args(&build_ssh_command(&tunnel));
+        // Non-legacy '-J' must not appear for a legacy tunnel.
+        assert!(!args.contains(&"-J".to_string()));
+        // The chain must embed the legacy options on every hop and never use
+        // the 'host:port' form (Windows OpenSSH can't parse it in ProxyCommand).
+        let pc = args
+            .windows(2)
+            .find(|w| w[0] == "-o" && w[1].starts_with("ProxyCommand="))
+            .map(|w| w[1].clone())
+            .expect("expected a -o ProxyCommand=... arg");
+        assert!(pc.contains("HostKeyAlgorithms=+ssh-rsa,ssh-dss"), "{pc}");
+        assert!(pc.contains("-W %h:%p alice@jump1.example.com"), "{pc}");
+        assert!(pc.contains("-W %h:%p bob@jump2.example.com -p 2222"), "{pc}");
+        assert!(!pc.contains("jump2.example.com:2222"), "{pc}");
     }
 
     #[test]

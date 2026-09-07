@@ -12,7 +12,7 @@ if (-not (Test-Path "target\release\whiskers.exe")) {
 }
 
 $dist = Join-Path $PSScriptRoot "..\dist"
-$version = "0.1.5"
+$version = "0.1.6"
 $exeName = "whiskers-v$version-win64"
 $pkgDir = Join-Path $dist $exeName
 
