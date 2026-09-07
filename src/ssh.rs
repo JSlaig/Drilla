@@ -255,33 +255,87 @@ fn resolve_askpass(prompt: &str, creds: &[AskpassCred]) -> String {
     String::new()
 }
 
-pub fn build_ssh_command(tunnel: &Tunnel) -> Command {
-    let mut cmd = Command::new("ssh");
-    cmd.arg("-N").arg("-T");
-    cmd.arg("-o").arg("StrictHostKeyChecking=accept-new");
-    cmd.arg("-o").arg("ConnectTimeout=15");
-
+fn base_options(tunnel: &Tunnel) -> Vec<String> {
+    let mut opts: Vec<String> = Vec::new();
+    opts.push("StrictHostKeyChecking=accept-new".to_string());
+    opts.push("ConnectTimeout=15".to_string());
     if tunnel.legacy {
         // Old servers only offer ssh-rsa / ssh-dss host keys; modern OpenSSH
         // disables these by default, so re-enable them (plus the kex/ciphers
         // such hardware-era servers need) for this tunnel only.
-        cmd.arg("-o")
-            .arg("HostKeyAlgorithms=+ssh-rsa,ssh-dss");
-        cmd.arg("-o").arg("PubkeyAcceptedAlgorithms=+ssh-rsa");
-        cmd.arg("-o")
-            .arg("KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1");
-        cmd.arg("-o")
-            .arg("Ciphers=+3des-cbc,aes128-cbc,aes192-cbc,aes256-cbc");
-        cmd.arg("-o").arg("MACs=+hmac-sha1,hmac-md5");
+        opts.push("HostKeyAlgorithms=+ssh-rsa,ssh-dss".to_string());
+        opts.push("PubkeyAcceptedAlgorithms=+ssh-rsa".to_string());
+        opts.push(
+            "KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1"
+                .to_string(),
+        );
+        opts.push("Ciphers=+3des-cbc,aes128-cbc,aes192-cbc,aes256-cbc".to_string());
+        opts.push("MACs=+hmac-sha1,hmac-md5".to_string());
+    }
+    opts
+}
+
+fn option_args(opts: &[String]) -> Vec<String> {
+    let mut args = Vec::new();
+    for o in opts {
+        args.push("-o".to_string());
+        args.push(o.clone());
+    }
+    args
+}
+
+/// `user@host` (or bare host) for a jump, ports used via `-p` on the command
+/// line because Windows OpenSSH mishandles the `user@host:port` form inside
+/// ProxyCommand strings.
+fn jump_target_arg(jump: &JumpHost) -> String {
+    if jump.user.is_empty() {
+        jump.host.clone()
+    } else {
+        format!("{}@{}", jump.user, jump.host)
+    }
+}
+
+/// Build a nested `ssh -W` chain string that replaces `-J`.
+///
+/// OpenSSH's `-J` negotiates each jump from a nested `ssh -W` process, and
+/// those nested processes ignore command-line `-o` options (only the ssh
+/// config file reaches them), so legacy `HostKeyAlgorithms` etc. never applied
+/// to the middle hops. Here we build the chain ourselves so every hop is
+/// negotiated by a local ssh with our options inline.
+fn proxy_chain(tunnel: &Tunnel) -> Option<String> {
+    if tunnel.jumps.is_empty() {
+        return None;
+    }
+    let opts = base_options(tunnel);
+    let prefix = {
+        let mut s = String::from("ssh");
+        for o in &opts {
+            s.push_str(" -o ");
+            s.push_str(o);
+        }
+        s
+    };
+    let mut chain = format!("{} -W %h:%p {}", prefix, jump_target_arg(&tunnel.jumps[0]));
+    for j in tunnel.jumps.iter().skip(1) {
+        let mut target = jump_target_arg(j);
+        if j.port != 0 && j.port != 22 {
+            target = format!("{} -p {}", target, j.port);
+        }
+        chain = format!("{} -o ProxyCommand=\"{}\" -W %h:%p {}", prefix, chain, target);
+    }
+    Some(chain)
+}
+
+pub fn build_ssh_command(tunnel: &Tunnel) -> Command {
+    let mut cmd = Command::new("ssh");
+    cmd.arg("-N").arg("-T");
+    let opts = base_options(tunnel);
+    for o in option_args(&opts) {
+        cmd.arg(o);
     }
 
-    if !tunnel.jumps.is_empty() {
-        let jumps: Vec<String> = tunnel
-            .jumps
-            .iter()
-            .map(jump_string)
-            .collect();
-        cmd.arg("-J").arg(jumps.join(","));
+    if let Some(chain) = proxy_chain(tunnel) {
+        cmd.arg("-o").arg(format!("ProxyCommand={chain}"));
     }
 
     let target_port = if tunnel.target.port == 0 {
@@ -317,18 +371,6 @@ pub fn format_command(tunnel: &Tunnel) -> String {
         }
     }
     parts.join(" ")
-}
-
-fn jump_string(jump: &JumpHost) -> String {
-    if jump.port == 0 || jump.port == 22 {
-        if jump.user.is_empty() {
-            jump.host.clone()
-        } else {
-            format!("{}@{}", jump.user, jump.host)
-        }
-    } else {
-        format!("{}@{}:{}", jump.user, jump.host, jump.port)
-    }
 }
 
 fn build_login(jump: Option<&JumpHost>, fallback_host: &str) -> String {
@@ -382,22 +424,27 @@ mod tests {
         };
 
         let args = cmd_to_args(&build_ssh_command(&tunnel));
-        assert_eq!(
-            args,
-            vec![
-                "ssh",
-                "-N",
-                "-T",
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                "ConnectTimeout=15",
-                "-J",
-                "alice@jump1.example.com,bob@jump2.example.com:2222,jump3.example.com",
-                "-L5433:db.internal:5432",
-                "alice@jump1.example.com"
-            ]
+        let prefix = "ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15";
+        let inner = format!("{prefix} -W %h:%p alice@jump1.example.com");
+        let level2 = format!(
+            "{prefix} -o ProxyCommand=\"{inner}\" -W %h:%p bob@jump2.example.com -p 2222"
         );
+        let level3 =
+            format!("{prefix} -o ProxyCommand=\"{level2}\" -W %h:%p jump3.example.com");
+        let expected = vec![
+            "ssh".to_string(),
+            "-N".to_string(),
+            "-T".to_string(),
+            "-o".to_string(),
+            "StrictHostKeyChecking=accept-new".to_string(),
+            "-o".to_string(),
+            "ConnectTimeout=15".to_string(),
+            "-o".to_string(),
+            format!("ProxyCommand={level3}"),
+            "-L5433:db.internal:5432".to_string(),
+            "alice@jump1.example.com".to_string(),
+        ];
+        assert_eq!(args, expected);
     }
 
     #[test]

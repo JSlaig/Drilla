@@ -242,12 +242,12 @@ impl App {
         Self::new_with_store(ConfigStore::new())
     }
 
-    pub fn new_with_store(store: ConfigStore) -> Self {
+pub fn new_with_store(store: ConfigStore) -> Self {
         let config = store.load();
         let mut ssh = SshManager::new();
         let names: Vec<String> = config.tunnels.iter().map(|t| t.name.clone()).collect();
         ssh.refresh_all(&names);
-        Self {
+Self {
             screen: Screen::List,
             list: ListState { selected: 0 },
             form: FormState::new_empty(),
@@ -330,7 +330,7 @@ impl App {
                 self.search.clear();
                 self.search_mode = true;
             }
-            KeyCode::Enter => {
+KeyCode::Enter => {
                 let vis = self.visible_tunnels();
                 if let Some(&idx) = vis.get(self.list.selected) {
                     let name = self.config.tunnels[idx].name.clone();
@@ -367,7 +367,7 @@ impl App {
                 if let Some(&idx) = vis.get(self.list.selected) {
                     let name = self.config.tunnels[idx].name.clone();
                     let _ = self.ssh.stop(&name);
-                    self.config.tunnels.remove(idx);
+self.config.tunnels.remove(idx);
                     self.list.clamp(self.visible_tunnels().len());
                     let _ = self.store.save(&self.config);
                     self.status = Some(format!("Deleted '{name}'"));
@@ -548,7 +548,7 @@ match key.code {
             self.config.tunnels[idx] = tunnel;
         }
 
-        self.store.save(&self.config).map_err(|e| e)?;
+self.store.save(&self.config).map_err(|e| e)?;
         Ok(())
     }
 }
@@ -568,7 +568,7 @@ mod tests {
         }
     }
 
-    fn temp_app(name: &str) -> App {
+fn temp_app(name: &str) -> App {
         let dir = std::env::temp_dir().join("ssht_cli_tests").join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
