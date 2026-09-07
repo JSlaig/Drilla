@@ -1,11 +1,11 @@
 @echo off
 setlocal
 
-set APP_NAME=drilla
+set APP_NAME=whiskers
 set INSTALL_DIR=%LOCALAPPDATA%\Programs\%APP_NAME%
 set EXE=%INSTALL_DIR%\%APP_NAME%.exe
 
-echo Installing Drilla (SSH Tunnel CLI) to %INSTALL_DIR%
+echo Installing Whiskers (SSH Tunnel CLI) to %INSTALL_DIR%
 
 if not exist "%INSTALL_DIR%" mkdir "%INSTALL_DIR%"
 
@@ -17,24 +17,21 @@ if %errorlevel% neq 0 (
     exit /b 1
 )
 
-copy /y "%~dp0drilla.exe" "%EXE%" >nul
+copy /y "%~dp0%APP_NAME%.exe" "%EXE%" >nul
 if %errorlevel% neq 0 (
     echo ERROR: failed to copy the executable.
     exit /b 1
 )
 
-REM Install the "drll" alias launcher alongside drilla.exe.
-copy /y "%~dp0drll.cmd" "%INSTALL_DIR%\drll.cmd" >nul
-
 REM Add install dir to the user PATH (permanent) if not already there,
-REM so "drilla" and "drll" work from any new terminal.
+REM so "whiskers" works from any new terminal.
 echo %PATH% | findstr /i "%INSTALL_DIR%" >nul
 if %errorlevel% neq 0 (
     setx PATH "%INSTALL_DIR%;%PATH%" >nul
 )
 
 echo.
-echo Installed. Open a NEW terminal and run:  drilla   (or its alias:  drll)
+echo Installed. Open a NEW terminal and run:  whiskers
 echo.
 echo Note: your tunnel config lives at %%USERPROFILE%%\.ssh\tunnels.json
 

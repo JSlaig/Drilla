@@ -105,10 +105,10 @@ impl SshManager {
         // hanging forever on a password prompt with no terminal.
         let creds = credentials_for(tunnel).unwrap_or_default();
         let path = write_askpass_file(&creds)?;
-        cmd.env("SSH_ASKPASS", askpass_program())
+        cmd            .env("SSH_ASKPASS", askpass_program())
             .env("SSH_ASKPASS_REQUIRE", "force")
-            .env("WHISKERS_ASKPASS_MODE", "1")
-            .env("WHISKERS_ASKPASS_FILE", &path);
+            .env("DRILLA_ASKPASS_MODE", "1")
+            .env("DRILLA_ASKPASS_FILE", &path);
 
         // For legacy tunnels, the nested `-J` hops and the login host must see
         // the legacy host-key/algo options. They ignore command-line -o, but
@@ -201,7 +201,7 @@ impl Running {
 }
 
 fn askpass_program() -> PathBuf {
-    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("whiskers"))
+    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("drilla"))
 }
 
 fn credentials_for(tunnel: &Tunnel) -> Option<Vec<AskpassCred>> {
@@ -251,7 +251,7 @@ fn write_askpass_file(creds: &[AskpassCred]) -> Result<PathBuf, String> {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let path = std::env::temp_dir().join(format!(
-        "whiskers_askpass_{}_{}.json",
+        "drilla_askpass_{}_{}.json",
         std::process::id(),
         stamp
     ));
@@ -264,7 +264,7 @@ pub fn run_askpass() -> i32 {
     let Some(prompt) = std::env::args().nth(1) else {
         return 1;
     };
-    let Some(file) = std::env::var("WHISKERS_ASKPASS_FILE").ok() else {
+    let Some(file) = std::env::var("DRILLA_ASKPASS_FILE").ok() else {
         return 1;
     };
     let creds: Vec<AskpassCred> = fs::read_to_string(&file)
@@ -321,8 +321,8 @@ fn resolve_askpass(prompt: &str, creds: &[AskpassCred]) -> String {
 // before the tunnel starts and removed once no legacy tunnel needs it.
 // ---------------------------------------------------------------------------
 
-const LEGACY_BEGIN: &str = "# === whiskers: legacy ssh algorithms (managed) ===";
-const LEGACY_END: &str = "# === end whiskers legacy ===";
+const LEGACY_BEGIN: &str = "# === drilla: legacy ssh algorithms (managed) ===";
+const LEGACY_END: &str = "# === end drilla legacy ===";
 
 const LEGACY_HOST_LINES: &str = "  HostKeyAlgorithms +ssh-rsa,ssh-dss\n  PubkeyAcceptedAlgorithms +ssh-rsa\n  KexAlgorithms +diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1\n  Ciphers +3des-cbc,aes128-cbc,aes192-cbc,aes256-cbc\n  MACs +hmac-sha1,hmac-md5\n";
 
@@ -476,12 +476,16 @@ fn sync_legacy_config_at(
 
 fn base_options(tunnel: &Tunnel) -> Vec<String> {
     let mut opts: Vec<String> = Vec::new();
-    opts.push("StrictHostKeyChecking=accept-new".to_string());
-    opts.push("ConnectTimeout=15".to_string());
     if tunnel.legacy {
         // Old servers only offer ssh-rsa / ssh-dss host keys; modern OpenSSH
         // disables these by default, so re-enable them (plus the kex/ciphers
-        // such hardware-era servers need) for this tunnel only.
+        // such hardware-era servers need), and auto-accept host keys: legacy
+        // servers and internal IPs often have keys that change or were rotated,
+        // which otherwise blocks the tunnel with "REMOTE HOST IDENTIFICATION
+        // HAS CHANGED". A per-tunnel throwaway known_hosts file keeps drilla
+        // from ever touching the user's real ~/.ssh/known_hosts.
+        opts.push("StrictHostKeyChecking=no".to_string());
+        opts.push("UserKnownHostsFile=NUL".to_string());
         opts.push("HostKeyAlgorithms=+ssh-rsa,ssh-dss".to_string());
         opts.push("PubkeyAcceptedAlgorithms=+ssh-rsa".to_string());
         opts.push(
@@ -490,7 +494,10 @@ fn base_options(tunnel: &Tunnel) -> Vec<String> {
         );
         opts.push("Ciphers=+3des-cbc,aes128-cbc,aes192-cbc,aes256-cbc".to_string());
         opts.push("MACs=+hmac-sha1,hmac-md5".to_string());
+    } else {
+        opts.push("StrictHostKeyChecking=accept-new".to_string());
     }
+    opts.push("ConnectTimeout=15".to_string());
     opts
 }
 
@@ -661,8 +668,12 @@ mod tests {
         // Like non-legacy, a legacy tunnel with jumps uses standard -J...
         assert!(args.contains(&"-J".to_string()));
         assert!(args.contains(&"alice@jump1.example.com,bob@jump2.example.com:2222".to_string()));
-        // ...and keeps the legacy -o options on the parent command too.
+        // ...keeps the legacy -o options on the parent command too...
         assert!(args.contains(&"HostKeyAlgorithms=+ssh-rsa,ssh-dss".to_string()));
+        // ...and auto-accepts host keys so changed keys never block it.
+        assert!(args.contains(&"StrictHostKeyChecking=no".to_string()));
+        assert!(args.contains(&"UserKnownHostsFile=NUL".to_string()));
+        assert!(!args.contains(&"StrictHostKeyChecking=accept-new".to_string()));
 
         // The nested -J hops read the managed config block, which must cover
         // every hop host (jump1, jump2) plus the login host (jump1).
@@ -698,12 +709,11 @@ mod tests {
         sync_legacy_config_at(Some(path.clone()), &[]).unwrap();
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("# user stuff"), "{content}");
-        assert!(!content.contains("whiskers: legacy"), "{content}");
+        assert!(!content.contains("drilla: legacy"), "{content}");
     }
 
     #[test]
-    fn start_writes_legacy_block_stop_clears_it() {
-        let dir = std::env::temp_dir().join("ssht_cli_start_stop");
+    fn start_writes_legacy_block_stop_clears_it() {        let dir = std::env::temp_dir().join("ssht_cli_start_stop");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("ssh_config");
@@ -737,7 +747,7 @@ mod tests {
         manager.stop("legacy1").ok();
         let content = fs::read_to_string(&path).unwrap_or_default();
         assert!(!content.contains("Host 172.30.110.4"), "should clear after stop: {content}");
-        assert!(!content.contains("whiskers: legacy"), "{content}");
+        assert!(!content.contains("drilla: legacy"), "{content}");
     }
 
     #[test]

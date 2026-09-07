@@ -18,8 +18,15 @@ use app::App;
 use event::Event;
 
 fn main() -> io::Result<()> {
+    // `--version` prints the build version and exits (no TUI). Lets users
+    // confirm which release they're really running.
+    if std::env::args().any(|a| a == "--version" || a == "-v") {
+        println!("drilla {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     // When ssh invokes this executable as SSH_ASKPASS, just answer the prompt.
-    if std::env::var("WHISKERS_ASKPASS_MODE").as_deref() == Ok("1") {
+    if std::env::var("DRILLA_ASKPASS_MODE").as_deref() == Ok("1") {
         std::process::exit(ssh::run_askpass());
     }
 

@@ -1,6 +1,6 @@
 [package]
-name = "whiskers"
-version = "0.1.8"
+name = "drilla"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -11,5 +11,5 @@ serde_json = "1"
 dirs = "6"
 
 [[bin]]
-name = "whiskers"
+name = "drilla"
 path = "src/main.rs"

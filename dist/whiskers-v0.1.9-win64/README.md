@@ -1,4 +1,4 @@
-# Drilla — SSH Tunnel CLI
+# Whiskers — SSH Tunnel CLI
 
 An interactive terminal CLI for managing SSH tunnels on Windows (Linux support pending). It wraps the OpenSSH binary and supports multiple jump hosts via `ProxyJump` chains.
 
@@ -19,27 +19,14 @@ An interactive terminal CLI for managing SSH tunnels on Windows (Linux support p
 
 ## Install (end user, no cargo needed)
 
-1. Download `drilla-v0.2.0-win64.zip` from Releases.
-2. Unzip and run `install.bat` (or just double-click `drilla.exe`).
+1. Download `whiskers-v0.1.0-win64.zip` from Releases.
+2. Unzip and run `install.bat` (or just double-click `whiskers.exe`).
 
-`install.bat` copies the exe to `%LOCALAPPDATA%\Programs\drilla` and adds it to
+`install.bat` copies the exe to `%LOCALAPPDATA%\Programs\whiskers` and adds it to
 your PATH, so you can launch it from any terminal with:
 
 ```
-drilla
-```
-
-`drll` is a built-in alias that also launches it, so both of these work:
-
-```
-drilla
-drll
-```
-
-To confirm which build you're running:
-
-```
-drilla --version
+whiskers
 ```
 
 ## Build from source
@@ -85,7 +72,7 @@ output says `no matching host key type found. Their offer: ssh-rsa,ssh-dss`.
 A legacy tunnel's command line looks just like a normal one (standard `-J` for
 jumps, one password prompt per host). To make the legacy options reach the *nested*
 `-J` jump processes (which ignore command-line `-o` but read `~/.ssh/config`),
-drilla stages a small *managed* `Host <ip>` block in `~/.ssh/config` while a
+whiskers stages a small *managed* `Host <ip>` block in `~/.ssh/config` while a
 legacy tunnel runs, listing exactly the jump + login servers that tunnel touches.
 It is removed automatically once no legacy tunnel needs it, and any of your other
 config lines are preserved.
@@ -133,7 +120,7 @@ ssh -N -T -J alice@bastion1.example.com,bob@bastion2.example.com:2222 \
     -L5432:db.internal:5432 alice@bastion1.example.com
 ```
 
-When any jump (or the target, for direct tunnels) has a `password`, drilla sets
+When any jump (or the target, for direct tunnels) has a `password`, whiskers sets
 `SSH_ASKPASS` to its own executable and answers the password prompts for each hop.
 
 > **Security note:** passwords are stored in plaintext in `~/.ssh/tunnels.json` and

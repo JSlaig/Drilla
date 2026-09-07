@@ -6,18 +6,20 @@ if (-not (Get-Command ssh -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-if (-not (Test-Path "target\release\whiskers.exe")) {
-    Write-Host "ERROR: target\release\whiskers.exe not found. Run 'cargo build --release' first." -ForegroundColor Red
+if (-not (Test-Path "target\release\drilla.exe")) {
+    Write-Host "ERROR: target\release\drilla.exe not found. Run 'cargo build --release' first." -ForegroundColor Red
     exit 1
 }
 
 $dist = Join-Path $PSScriptRoot "..\dist"
-$version = "0.1.8"
-$exeName = "whiskers-v$version-win64"
+$version = "0.2.0"
+$exeName = "drilla-v$version-win64"
 $pkgDir = Join-Path $dist $exeName
 
 New-Item -ItemType Directory -Path $pkgDir -Force | Out-Null
-Copy-Item "target\release\whiskers.exe" $pkgDir -Force
+Copy-Item "target\release\drilla.exe" $pkgDir -Force
+# "drll" is an alias that invokes drilla.
+Copy-Item (Join-Path $PSScriptRoot "drll.cmd") $pkgDir -Force
 Copy-Item (Join-Path $dist "install.bat") $pkgDir -Force
 Copy-Item "README.md" $pkgDir -Force
 
