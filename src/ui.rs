@@ -38,7 +38,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
 fn draw_list_hints(frame: &mut Frame, area: Rect) {
     let hints = Paragraph::new(
-        "Enter: run/stop | n: new | e: edit | d: delete | q: quit",
+        "Enter: run/stop | j/k: nav | /: search | n: new | e: edit | d: delete | q: quit",
     )
     .style(Style::default().fg(Color::DarkGray))
     .alignment(Alignment::Center);
@@ -54,23 +54,35 @@ fn draw_status_bar(frame: &mut Frame, area: Rect, text: &str) {
 }
 
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
-    let title = " SSH Tunnel Manager ";
+    let search_text = if app.search_mode {
+        format!("/{}_", app.search)
+    } else if !app.search.is_empty() {
+        format!("(filtered by: {})", app.search)
+    } else {
+        String::new()
+    };
+    let title = if search_text.is_empty() {
+        " SSH Tunnel Manager ".to_string()
+    } else {
+        format!(" SSH Tunnel Manager {} ", search_text)
+    };
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .title_alignment(Alignment::Center);
+        .title_alignment(Alignment::Left);
 
-    let names: Vec<&str> = app.config.tunnels.iter().map(|t| t.name.as_str()).collect();
+    let vis = app.visible_tunnels();
+    let names: Vec<&str> =
+        vis.iter().map(|&i| app.config.tunnels[i].name.as_str()).collect();
     let statuses = app.ssh.running_snapshot(&names);
 
-    let rows_widgets: Vec<Row> = app
-        .config
-        .tunnels
+    let rows_widgets: Vec<Row> = vis
         .iter()
         .enumerate()
-        .map(|(i, t)| {
-            let style = if i == app.list.selected {
+        .map(|(shown_idx, &real_idx)| {
+            let t = &app.config.tunnels[real_idx];
+            let style = if shown_idx == app.list.selected {
                 Style::default()
                     .bg(Color::Blue)
                     .fg(Color::White)
@@ -87,7 +99,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             let is_target = format!("{}:{}", t.target.host, t.target.port);
             let jumps = t.jumps.len().to_string();
             Row::new(vec![
-                (i + 1).to_string(),
+                (shown_idx + 1).to_string(),
                 t.name.clone(),
                 status.to_string(),
                 t.local_port.to_string(),
@@ -132,9 +144,9 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     let chunks = Layout::new(Direction::Vertical, [
-        Constraint::Length(9),
-        Constraint::Min(5),
-        Constraint::Length(6),
+        Constraint::Length(5),
+        Constraint::Min(4),
+        Constraint::Length(5),
     ])
     .split(inner);
 
@@ -162,19 +174,19 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
 
     // Jumps list
     let jumps_title = format!(
-        " Jump Hosts [a=add, e=edit, x=remove] ",
+        " Jump Hosts [a=add, e=edit, x=remove, j/k=move] ",
     );
+    let jump_style = if form.input == InputField::Jumps {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
     let jumps_block = Block::default()
         .title(jumps_title)
-        .borders(Borders::ALL);
+        .borders(Borders::ALL)
+        .border_style(jump_style);
     let jumps_inner = jumps_block.inner(chunks[1]);
     frame.render_widget(jumps_block, chunks[1]);
-
-    let jumps_chunks = Layout::new(Direction::Vertical, [
-        Constraint::Min(3),
-        Constraint::Length(3),
-    ])
-    .split(jumps_inner);
 
     let items: Vec<ListItem> = form
         .jumps
@@ -197,23 +209,15 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
         .collect();
 
     if items.is_empty() {
-        let empty = Paragraph::new("No jump hosts yet. Press 'a' to add one.")
+        let empty = Paragraph::new("No jump hosts yet. Press 'a' while here to add one.")
             .style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(empty, jumps_chunks[0]);
+        frame.render_widget(empty, jumps_inner);
     } else {
         let list = ratatui::widgets::List::new(items).highlight_style(
             Style::default().bg(Color::Blue).fg(Color::White),
         );
-        frame.render_widget(list, jumps_chunks[0]);
+        frame.render_widget(list, jumps_inner);
     }
-
-    draw_input(
-        frame,
-        jumps_chunks[1],
-        "Key Path (optional)",
-        &form.key_path,
-        form.input == InputField::KeyPath,
-    );
 
     // Bottom target fields
     let bottom = Layout::new(Direction::Horizontal, [
@@ -237,12 +241,6 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
         form.input == InputField::TargetPort,
     );
 
-    let note = Paragraph::new(
-        "Tab: next field | Enter: save | Esc: back",
-    )
-    .style(Style::default().fg(Color::DarkGray))
-    .alignment(Alignment::Center);
-
     if let Some(err) = &form.error {
         let err_text = format!("Error: {}", err);
         let e = Paragraph::new(err_text)
@@ -254,8 +252,6 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             height: 1,
         });
     }
-
-    let _ = note;
 }
 
 fn draw_jump_form(frame: &mut Frame, app: &App, area: Rect) {

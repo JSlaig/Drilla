@@ -17,14 +17,23 @@ pub struct ListState {
     pub selected: usize,
 }
 
+impl ListState {
+    pub fn clamp(&mut self, len: usize) {
+        if len == 0 {
+            self.selected = 0;
+        } else if self.selected >= len {
+            self.selected = len - 1;
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputField {
     Name,
     LocalPort,
-    KeyPath,
+    Jumps,
     TargetHost,
     TargetPort,
-    Jumps,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,7 +46,6 @@ pub enum JumpField {
 pub struct FormState {
     pub name: String,
     pub local_port: String,
-    pub key_path: String,
     pub target_host: String,
     pub target_port: String,
     pub jumps: Vec<JumpHost>,
@@ -53,7 +61,6 @@ impl FormState {
         Self {
             name: String::new(),
             local_port: String::new(),
-            key_path: String::new(),
             target_host: String::new(),
             target_port: String::new(),
             jumps: Vec::new(),
@@ -69,7 +76,6 @@ impl FormState {
         Self {
             name: tunnel.name.clone(),
             local_port: tunnel.local_port.to_string(),
-            key_path: tunnel.key_path.clone().unwrap_or_default(),
             target_host: tunnel.target.host.clone(),
             target_port: tunnel.target.port.to_string(),
             jumps: tunnel.jumps.clone(),
@@ -96,14 +102,6 @@ impl FormState {
         } else {
             parse_port(&self.target_port)?
         };
-        let key_path = {
-            let k = self.key_path.trim().to_string();
-            if k.is_empty() {
-                None
-            } else {
-                Some(k)
-            }
-        };
         Ok(Tunnel {
             name,
             jumps: self.jumps.clone(),
@@ -112,18 +110,16 @@ impl FormState {
                 port: target_port,
             },
             local_port,
-            key_path,
         })
     }
 
     pub fn cycle_input(&mut self) {
         self.input = match self.input {
             InputField::Name => InputField::LocalPort,
-            InputField::LocalPort => InputField::KeyPath,
-            InputField::KeyPath => InputField::TargetHost,
+            InputField::LocalPort => InputField::Jumps,
+            InputField::Jumps => InputField::TargetHost,
             InputField::TargetHost => InputField::TargetPort,
-            InputField::TargetPort => InputField::Jumps,
-            InputField::Jumps => InputField::Name,
+            InputField::TargetPort => InputField::Name,
         };
     }
 }
@@ -142,7 +138,7 @@ impl JumpFormState {
         Self {
             user: String::new(),
             host: String::new(),
-            port: String::from("22"),
+            port: String::new(),
             input: JumpField::Host,
             error: None,
             edit_index: None,
@@ -179,9 +175,9 @@ impl JumpFormState {
 
     pub fn cycle_input(&mut self) {
         self.input = match self.input {
-            JumpField::User => JumpField::Host,
-            JumpField::Host => JumpField::Port,
-            JumpField::Port => JumpField::User,
+            JumpField::Host => JumpField::User,
+            JumpField::User => JumpField::Port,
+            JumpField::Port => JumpField::Host,
         };
     }
 }
@@ -203,12 +199,16 @@ pub struct App {
     pub store: ConfigStore,
     pub ssh: SshManager,
     pub status: Option<String>,
-    pub next_screen: Option<Screen>,
+    pub search: String,
+    pub search_mode: bool,
 }
 
 impl App {
     pub fn new() -> Self {
-        let store = ConfigStore::new();
+        Self::new_with_store(ConfigStore::new())
+    }
+
+    pub fn new_with_store(store: ConfigStore) -> Self {
         let config = store.load();
         let mut ssh = SshManager::new();
         let names: Vec<String> = config.tunnels.iter().map(|t| t.name.clone()).collect();
@@ -222,11 +222,11 @@ impl App {
             store,
             ssh,
             status: None,
-            next_screen: None,
+            search: String::new(),
+            search_mode: false,
         }
     }
-
-    pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
+        pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         match self.screen {
             Screen::List => self.handle_list_key(key),
             Screen::Create | Screen::Edit => self.handle_form_key(key),
@@ -234,30 +234,80 @@ impl App {
         }
     }
 
+    pub fn visible_tunnels(&self) -> Vec<usize> {
+        let q = self.search.trim().to_lowercase();
+        if q.is_empty() {
+            return (0..self.config.tunnels.len()).collect();
+        }
+        self.config
+            .tunnels
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                t.name.to_lowercase().contains(&q)
+                    || t.target.host.to_lowercase().contains(&q)
+                    || t.target.port.to_string().contains(&q)
+                    || t.local_port.to_string().contains(&q)
+                    || t.jumps.iter().any(|j| {
+                        j.host.to_lowercase().contains(&q)
+                            || j.user.to_lowercase().contains(&q)
+                    })
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     fn handle_list_key(&mut self, key: crossterm::event::KeyEvent) {
+        if self.search_mode {
+            match key.code {
+                KeyCode::Esc => {
+                    self.search.clear();
+                    self.search_mode = false;
+                }
+                KeyCode::Char(c) => {
+                    self.search.push(c);
+                }
+                KeyCode::Backspace => {
+                    self.search.pop();
+                }
+                KeyCode::Enter => {
+                    self.search_mode = false;
+                }
+                _ => {}
+            }
+            let vis = self.visible_tunnels().len();
+            self.list.clamp(vis);
+            return;
+        }
+
         match key.code {
-            KeyCode::Up => {
+            KeyCode::Up | KeyCode::Char('k') => {
                 if self.list.selected > 0 {
                     self.list.selected -= 1;
                 }
             }
-            KeyCode::Down => {
-                if !self.config.tunnels.is_empty()
-                    && self.list.selected + 1 < self.config.tunnels.len()
-                {
+            KeyCode::Down | KeyCode::Char('j') => {
+                let vis = self.visible_tunnels().len();
+                if vis > 0 && self.list.selected + 1 < vis {
                     self.list.selected += 1;
                 }
             }
+            KeyCode::Char('/') => {
+                self.search.clear();
+                self.search_mode = true;
+            }
             KeyCode::Enter => {
-                if let Some(tunnel) = self.config.tunnels.get(self.list.selected) {
-                    let name = tunnel.name.clone();
+                let vis = self.visible_tunnels();
+                if let Some(&idx) = vis.get(self.list.selected) {
+                    let name = self.config.tunnels[idx].name.clone();
                     if self.ssh.is_running(&name) {
                         match self.ssh.stop(&name) {
                             Ok(_) => self.status = Some(format!("Stopped '{name}'")),
                             Err(e) => self.status = Some(format!("Error: {e}")),
                         }
                     } else {
-                        match self.ssh.start(tunnel) {
+                        let tunnel = self.config.tunnels[idx].clone();
+                        match self.ssh.start(&tunnel) {
                             Ok(_) => self.status = Some(format!("Started '{name}'")),
                             Err(e) => self.status = Some(format!("Error: {e}")),
                         }
@@ -270,30 +320,28 @@ impl App {
                 self.screen = Screen::Create;
             }
             KeyCode::Char('e') => {
-                if !self.config.tunnels.is_empty() {
-                    let tunnel = self.config.tunnels[self.list.selected].clone();
-                    self.form = FormState::from_tunnel(&tunnel, self.list.selected);
+                let vis = self.visible_tunnels();
+                if let Some(&idx) = vis.get(self.list.selected) {
+                    let tunnel = self.config.tunnels[idx].clone();
+                    self.form = FormState::from_tunnel(&tunnel, idx);
                     self.status = None;
                     self.screen = Screen::Edit;
                 }
             }
             KeyCode::Char('d') => {
-                if !self.config.tunnels.is_empty() {
-                    let name = self.config.tunnels[self.list.selected].name.clone();
+                let vis = self.visible_tunnels();
+                if let Some(&idx) = vis.get(self.list.selected) {
+                    let name = self.config.tunnels[idx].name.clone();
                     let _ = self.ssh.stop(&name);
-                    self.config.tunnels.remove(self.list.selected);
-                    if self.list.selected >= self.config.tunnels.len() && !self.config.tunnels.is_empty() {
-                        self.list.selected = self.config.tunnels.len() - 1;
-                    }
+                    self.config.tunnels.remove(idx);
+                    self.list.clamp(self.visible_tunnels().len());
                     let _ = self.store.save(&self.config);
                     self.status = Some(format!("Deleted '{name}'"));
                 }
             }
             KeyCode::Char('q') => {
-                self.status = Some("Saving config...".to_string());
-                match self.store.save(&self.config) {
-                    Ok(_) => self.status = Some("Bye! Config saved.".to_string()),
-                    Err(e) => self.status = Some(format!("Save error: {e}")),
+                if let Err(e) = self.store.save(&self.config) {
+                    self.status = Some(format!("Save error: {e}"));
                 }
             }
             _ => {}
@@ -309,37 +357,6 @@ impl App {
             KeyCode::Tab => {
                 self.form.cycle_input();
             }
-            KeyCode::Char('a') => {
-                self.jump_form = JumpFormState::new_empty();
-                self.next_screen = Some(Screen::JumpAdd);
-            }
-            KeyCode::Char('x') => {
-                if !self.form.jumps.is_empty() {
-                    self.form.jumps.remove(self.form.selected_jump);
-                    if self.form.selected_jump >= self.form.jumps.len() && !self.form.jumps.is_empty() {
-                        self.form.selected_jump = self.form.jumps.len() - 1;
-                    }
-                }
-            }
-            KeyCode::Char('e') => {
-                if !self.form.jumps.is_empty() {
-                    let jump = self.form.jumps[self.form.selected_jump].clone();
-                    self.jump_form = JumpFormState::from_jump(&jump, self.form.selected_jump);
-                    self.next_screen = Some(Screen::JumpEdit);
-                }
-            }
-            KeyCode::Up => {
-                if self.form.selected_jump > 0 {
-                    self.form.selected_jump -= 1;
-                }
-            }
-            KeyCode::Down => {
-                if !self.form.jumps.is_empty()
-                    && self.form.selected_jump + 1 < self.form.jumps.len()
-                {
-                    self.form.selected_jump += 1;
-                }
-            }
             KeyCode::Enter => {
                 match self.save_form() {
                     Ok(_) => {
@@ -349,31 +366,71 @@ impl App {
                     Err(e) => self.form.error = Some(e),
                 }
             }
-            KeyCode::Char(c) => match self.form.input {
-                InputField::Name => self.form.name.push(c),
-                InputField::LocalPort => self.form.local_port.push(c),
-                InputField::KeyPath => self.form.key_path.push(c),
-                InputField::TargetHost => self.form.target_host.push(c),
-                InputField::TargetPort => self.form.target_port.push(c),
-            },
-            KeyCode::Backspace => match self.form.input {
-                InputField::Name => {
-                    self.form.name.pop();
+            _ => {
+                if self.form.input == InputField::Jumps {
+                    match key.code {
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            if self.form.selected_jump > 0 {
+                                self.form.selected_jump -= 1;
+                            }
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            if self.form.selected_jump + 1 < self.form.jumps.len() {
+                                self.form.selected_jump += 1;
+                            }
+                        }
+                        KeyCode::Char('a') => {
+                            self.jump_form = JumpFormState::new_empty();
+                            self.screen = Screen::JumpAdd;
+                        }
+                        KeyCode::Char('e') => {
+                            if !self.form.jumps.is_empty() {
+                                let jump = self.form.jumps[self.form.selected_jump].clone();
+                                self.jump_form =
+                                    JumpFormState::from_jump(&jump, self.form.selected_jump);
+                                self.screen = Screen::JumpEdit;
+                            }
+                        }
+                        KeyCode::Char('x') => {
+                            if !self.form.jumps.is_empty() {
+                                self.form.jumps.remove(self.form.selected_jump);
+                                if self.form.selected_jump >= self.form.jumps.len()
+                                    && !self.form.jumps.is_empty()
+                                {
+                                    self.form.selected_jump = self.form.jumps.len() - 1;
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match key.code {
+                        KeyCode::Char(c) => match self.form.input {
+                            InputField::Name => self.form.name.push(c),
+                            InputField::LocalPort => self.form.local_port.push(c),
+                            InputField::TargetHost => self.form.target_host.push(c),
+                            InputField::TargetPort => self.form.target_port.push(c),
+                            InputField::Jumps => {}
+                        },
+                        KeyCode::Backspace => match self.form.input {
+                            InputField::Name => {
+                                self.form.name.pop();
+                            }
+                            InputField::LocalPort => {
+                                self.form.local_port.pop();
+                            }
+                            InputField::TargetHost => {
+                                self.form.target_host.pop();
+                            }
+                            InputField::TargetPort => {
+                                self.form.target_port.pop();
+                            }
+                            InputField::Jumps => {}
+                        },
+                        _ => {}
+                    }
                 }
-                InputField::LocalPort => {
-                    self.form.local_port.pop();
-                }
-                InputField::KeyPath => {
-                    self.form.key_path.pop();
-                }
-                InputField::TargetHost => {
-                    self.form.target_host.pop();
-                }
-                InputField::TargetPort => {
-                    self.form.target_port.pop();
-                }
-            },
-            _ => {}
+            }
         }
     }
 
@@ -450,5 +507,204 @@ impl App {
 
         self.store.save(&self.config).map_err(|e| e)?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+    }
+
+    fn temp_app(name: &str) -> App {
+        let dir = std::env::temp_dir().join("ssht_cli_tests").join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = ConfigStore::with_path(dir.join("tunnels.json"));
+        App::new_with_store(store)
+    }
+
+    #[test]
+    fn create_tunnel_with_two_jumps() {
+        let mut app = temp_app("create_two_jumps");
+
+        // Main list -> create
+        app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(app.screen, Screen::Create);
+        assert_eq!(app.form.input, InputField::Name);
+
+        // Name (contains letters that used to be intercepted: a, e, x)
+        type_text(&mut app, "ProdAPI eu-1 a");
+        assert_eq!(app.form.name, "ProdAPI eu-1 a");
+        app.handle_key(key(KeyCode::Tab)); // -> LocalPort
+        assert_eq!(app.form.input, InputField::LocalPort);
+        type_text(&mut app, "8443");
+        app.handle_key(key(KeyCode::Tab)); // -> Jumps
+        assert_eq!(app.form.input, InputField::Jumps);
+
+        // Add jump #1
+        app.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(app.screen, Screen::JumpAdd);
+        assert_eq!(app.jump_form.input, JumpField::Host);
+        type_text(&mut app, "bastion.example.com");
+        app.handle_key(key(KeyCode::Tab)); // -> User
+        assert_eq!(app.jump_form.input, JumpField::User);
+        type_text(&mut app, "alice");
+        app.handle_key(key(KeyCode::Tab)); // -> Port
+        assert_eq!(app.jump_form.input, JumpField::Port);
+        type_text(&mut app, "2222");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.screen, Screen::Create);
+        assert_eq!(app.form.jumps.len(), 1);
+        assert_eq!(app.form.input, InputField::Jumps);
+
+        // Add jump #2
+        app.handle_key(key(KeyCode::Char('a')));
+        assert_eq!(app.screen, Screen::JumpAdd);
+        type_text(&mut app, "bastion2.example.com");
+        app.handle_key(key(KeyCode::Tab));
+        type_text(&mut app, "ops");
+        app.handle_key(key(KeyCode::Tab));
+        type_text(&mut app, "22");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.screen, Screen::Create);
+        assert_eq!(app.form.jumps.len(), 2);
+
+        // Tab -> TargetHost, type (contains 'a')
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.form.input, InputField::TargetHost);
+        type_text(&mut app, "api.internal.example.com");
+        assert_eq!(app.form.target_host, "api.internal.example.com");
+        // Tab -> TargetPort
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.form.input, InputField::TargetPort);
+        type_text(&mut app, "443");
+
+        // Save
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.screen, Screen::List);
+        assert_eq!(app.config.tunnels.len(), 1);
+
+        let t = &app.config.tunnels[0];
+        assert_eq!(t.name, "ProdAPI eu-1 a");
+        assert_eq!(t.local_port, 8443);
+        assert_eq!(t.target.host, "api.internal.example.com");
+        assert_eq!(t.target.port, 443);
+        assert_eq!(t.jumps.len(), 2);
+        assert_eq!(t.jumps[0].host, "bastion.example.com");
+        assert_eq!(t.jumps[0].user, "alice");
+        assert_eq!(t.jumps[0].port, 2222);
+        assert_eq!(t.jumps[1].host, "bastion2.example.com");
+        assert_eq!(t.jumps[1].user, "ops");
+        assert_eq!(t.jumps[1].port, 22);
+
+        // Verify it was persisted to disk
+        let saved = app.store.load();
+        assert_eq!(saved.tunnels.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_name_is_rejected() {
+        let mut app = temp_app("duplicate_name");
+        app.config.tunnels.push(Tunnel {
+            name: "ProdAPI".into(),
+            jumps: vec![],
+            target: Target {
+                host: "h".into(),
+                port: 22,
+            },
+            local_port: 1
+        });
+
+        app.handle_key(key(KeyCode::Char('n')));
+        type_text(&mut app, "ProdAPI");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.screen, Screen::Create);
+        assert!(app.form.error.is_some());
+
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.screen, Screen::List);
+    }
+
+    #[test]
+    fn search_filters_list() {
+        let mut app = temp_app("search_filter");
+        app.config.tunnels = vec![
+            Tunnel {
+                name: "Alpha".into(),
+                jumps: vec![],
+                target: Target { host: "a.example.com".into(), port: 22 },
+                local_port: 1
+            },
+            Tunnel {
+                name: "Beta".into(),
+                jumps: vec![],
+                target: Target { host: "b.example.com".into(), port: 22 },
+                local_port: 2
+            },
+        ];
+
+        // enter search mode
+        app.handle_key(key(KeyCode::Char('/')));
+        assert!(app.search_mode);
+        type_text(&mut app, "beta");
+        let vis = app.visible_tunnels();
+        assert_eq!(vis.len(), 1);
+        assert_eq!(app.config.tunnels[vis[0]].name, "Beta");
+
+        // Esc clears search
+        app.handle_key(key(KeyCode::Esc));
+        assert!(!app.search_mode);
+        assert_eq!(app.visible_tunnels().len(), 2);
+    }
+
+    #[test]
+    fn vim_navigation_and_delete() {
+        let mut app = temp_app("vim_nav");
+        app.config.tunnels = vec![
+            Tunnel {
+                name: "One".into(),
+                jumps: vec![],
+                target: Target { host: "1.example.com".into(), port: 22 },
+                local_port: 1
+            },
+            Tunnel {
+                name: "Two".into(),
+                jumps: vec![],
+                target: Target { host: "2.example.com".into(), port: 22 },
+                local_port: 2
+            },
+            Tunnel {
+                name: "Three".into(),
+                jumps: vec![],
+                target: Target { host: "3.example.com".into(), port: 22 },
+                local_port: 3
+            },
+        ];
+
+        // 'j' moves down, 'k' moves up
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.list.selected, 1);
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.list.selected, 2);
+        app.handle_key(key(KeyCode::Char('j'))); // clamped at bottom
+        assert_eq!(app.list.selected, 2);
+        app.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(app.list.selected, 1);
+
+        // 'd' deletes the selected tunnel
+        app.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(app.config.tunnels.len(), 2);
+        assert_eq!(app.config.tunnels[0].name, "One");
+        assert_eq!(app.config.tunnels[1].name, "Three");
     }
 }

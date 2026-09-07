@@ -14,6 +14,10 @@ impl ConfigStore {
         Self { path }
     }
 
+    pub fn with_path(path: PathBuf) -> Self {
+        Self { path }
+    }
+
     pub fn load(&self) -> Config {
         if !self.path.exists() {
             return Config::empty();

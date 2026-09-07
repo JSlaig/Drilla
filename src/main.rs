@@ -56,8 +56,11 @@ fn run<B: ratatui::backend::Backend>(
                     // attempt to save nothing special
                     break;
                 }
-                // 'q' quits on list screen
-                if app.screen == app::Screen::List && key.code == KeyCode::Char('q') {
+                // 'q' quits on list screen (unless typing into the search box)
+                if app.screen == app::Screen::List
+                    && !app.search_mode
+                    && key.code == KeyCode::Char('q')
+                {
                     let _ = app.store.save(&app.config);
                     break;
                 }

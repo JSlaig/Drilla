@@ -60,8 +60,7 @@ Stored at `~/.ssh/tunnels.json`:
         { "user": "bob", "host": "bastion2.example.com", "port": 2222 }
       ],
       "target": { "host": "db.internal", "port": 5432 },
-      "local_port": 5432,
-      "key_path": "~/.ssh/id_rsa"
+      "local_port": 5432
     }
   ]
 }
@@ -71,5 +70,5 @@ This generates roughly:
 
 ```
 ssh -N -T -J alice@bastion1.example.com,bob@bastion2.example.com:2222 \
-    -L5432:db.internal:5432 -i ~/.ssh/id_rsa alice@bastion1.example.com
+    -L5432:db.internal:5432 alice@bastion1.example.com
 ```

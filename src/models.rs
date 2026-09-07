@@ -22,8 +22,6 @@ pub struct Tunnel {
     pub target: Target,
     #[serde(default = "default_local_port")]
     pub local_port: u16,
-    #[serde(default)]
-    pub key_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

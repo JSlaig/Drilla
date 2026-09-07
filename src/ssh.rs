@@ -100,12 +100,6 @@ pub fn build_ssh_command(tunnel: &Tunnel) -> Command {
     );
     cmd.arg(forward);
 
-    if let Some(key) = &tunnel.key_path {
-        if !key.is_empty() {
-            cmd.arg("-i").arg(key);
-        }
-    }
-
     let target_arg = build_login(tunnel.jumps.first(), &tunnel.target.host);
     cmd.arg(target_arg);
 
@@ -173,7 +167,6 @@ mod tests {
                 port: 5432,
             },
             local_port: 5433,
-            key_path: Some("C:/Users/me/.ssh/id_rsa".into()),
         };
 
         let args = cmd_to_args(&build_ssh_command(&tunnel));
@@ -186,8 +179,6 @@ mod tests {
                 "-J",
                 "alice@jump1.example.com,bob@jump2.example.com:2222,jump3.example.com",
                 "-L5433:db.internal:5432",
-                "-i",
-                "C:/Users/me/.ssh/id_rsa",
                 "alice@jump1.example.com"
             ]
         );
@@ -203,7 +194,6 @@ mod tests {
                 port: 22,
             },
             local_port: 8080,
-            key_path: None,
         };
 
         let args = cmd_to_args(&build_ssh_command(&tunnel));
