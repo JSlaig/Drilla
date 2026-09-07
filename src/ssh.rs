@@ -28,6 +28,8 @@ pub struct SshManager {
     outputs: HashMap<String, String>,
     // name -> hosts that need legacy algorithms while this tunnel runs
     legacy_hosts: HashMap<String, Vec<String>>,
+    // override for the managed ~/.ssh/config path (tests inject a temp path)
+    config_path: Option<PathBuf>,
 }
 
 impl SshManager {
@@ -36,7 +38,15 @@ impl SshManager {
             procs: HashMap::new(),
             outputs: HashMap::new(),
             legacy_hosts: HashMap::new(),
+            config_path: None,
         }
+    }
+
+    #[cfg(test)]
+    fn with_config_path(path: PathBuf) -> Self {
+        let mut m = Self::new();
+        m.config_path = Some(path);
+        m
     }
 
     fn refresh(&mut self) {
@@ -57,7 +67,7 @@ impl SshManager {
                         let _ = fs::remove_file(p);
                     }
                     if self.legacy_hosts.remove(&n).is_some() {
-                        let _ = sync_legacy_config_at(None, &self.active_legacy_tunnels());
+                        let _ = sync_legacy_config_at(self.config_path.clone(), &self.active_legacy_tunnels());
                     }
                 }
             }
@@ -106,7 +116,17 @@ impl SshManager {
         if tunnel.legacy {
             let hosts = tunnel_ssh_hosts(tunnel);
             self.legacy_hosts.insert(tunnel.name.clone(), hosts.clone());
-            let _ = sync_legacy_config_at(None, &self.active_legacy_tunnels());
+            // Build the block from the staged hosts directly — the tunnel is
+            // added to `self.procs` only after spawn, so active_legacy_tunnels()
+            // would omit it here.
+            let mut active: Vec<(String, Vec<String>)> = Vec::new();
+            active.push((tunnel.name.clone(), hosts));
+            for (n, h) in self.legacy_hosts.iter() {
+                if n != &tunnel.name {
+                    active.push((n.clone(), h.clone()));
+                }
+            }
+            let _ = sync_legacy_config_at(self.config_path.clone(), &active);
         }
 
         let child = cmd.spawn().map_err(|e| format!("failed to spawn ssh: {e}"))?;
@@ -135,7 +155,7 @@ impl SshManager {
             }
         }
         if self.legacy_hosts.remove(name).is_some() {
-            let _ = sync_legacy_config_at(None, &self.active_legacy_tunnels());
+            let _ = sync_legacy_config_at(self.config_path.clone(), &self.active_legacy_tunnels());
         }
         Ok(())
     }
@@ -159,7 +179,7 @@ impl SshManager {
     /// exit after all tunnels stopped).
     pub fn clear_legacy_block(&mut self) {
         self.legacy_hosts.clear();
-        let _ = clear_legacy_config();
+        let _ = sync_legacy_config_at(self.config_path.clone(), &[]);
     }
 }
 
@@ -454,11 +474,6 @@ fn sync_legacy_config_at(
     write_managed_config(resolved, &legacy_section_for(tunnels))
 }
 
-/// Remove the managed legacy section from the user's ssh config.
-pub fn clear_legacy_config() -> Result<(), String> {
-    write_managed_config(default_config_path(), "")
-}
-
 fn base_options(tunnel: &Tunnel) -> Vec<String> {
     let mut opts: Vec<String> = Vec::new();
     opts.push("StrictHostKeyChecking=accept-new".to_string());
@@ -683,6 +698,45 @@ mod tests {
         sync_legacy_config_at(Some(path.clone()), &[]).unwrap();
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("# user stuff"), "{content}");
+        assert!(!content.contains("whiskers: legacy"), "{content}");
+    }
+
+    #[test]
+    fn start_writes_legacy_block_stop_clears_it() {
+        let dir = std::env::temp_dir().join("ssht_cli_start_stop");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ssh_config");
+
+        let mut manager = SshManager::with_config_path(path.clone());
+
+        let tunnel = Tunnel {
+            name: "legacy1".into(),
+            jumps: vec![
+                jump("nor", "172.30.110.4", 22, None),
+                jump("nor", "10.200.10.140", 22, None),
+            ],
+            target: Target {
+                host: "192.168.4.93".into(),
+                port: 8443,
+                password: None,
+            },
+            local_port: 8443,
+            legacy: true,
+        };
+
+        // start() stages the block for this tunnel before/regardless of the
+        // (unreachable) connection outcome.
+        let _ = manager.start(&tunnel);
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        assert!(content.contains("Host 172.30.110.4"), "{content}");
+        assert!(content.contains("Host 10.200.10.140"), "{content}");
+        assert!(content.contains("HostKeyAlgorithms +ssh-rsa,ssh-dss"), "{content}");
+
+        // The block is present while the tunnel is "running".
+        manager.stop("legacy1").ok();
+        let content = fs::read_to_string(&path).unwrap_or_default();
+        assert!(!content.contains("Host 172.30.110.4"), "should clear after stop: {content}");
         assert!(!content.contains("whiskers: legacy"), "{content}");
     }
 
