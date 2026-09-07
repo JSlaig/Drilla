@@ -1,4 +1,4 @@
-# SSH Tunnel CLI
+# Whiskers — SSH Tunnel CLI
 
 An interactive terminal CLI for managing SSH tunnels on Windows (Linux support pending). It wraps the OpenSSH binary and supports multiple jump hosts via `ProxyJump` chains.
 
@@ -7,42 +7,56 @@ An interactive terminal CLI for managing SSH tunnels on Windows (Linux support p
 - Interactive TUI (list tunnels, create/edit/delete, run/stop)
 - Multiple jump hosts per tunnel (built into a `-J` proxy jump chain)
 - Local port forwarding
-- Optional identity key path per tunnel
+- Vim-style navigation (`j`/`k`) and `/` incremental search
 - Config persisted to `~/.ssh/tunnels.json`
 
 ## Requirements
 
 - OpenSSH client on `PATH` (`ssh -V` to verify) — ships with Windows 10/11
 - Windows or Linux
+- No Rust toolchain needed to run: use a prebuilt release zip
 
-## Usage
+## Install (end user, no cargo needed)
+
+1. Download `whiskers-v0.1.0-win64.zip` from Releases.
+2. Unzip and run `install.bat` (or just double-click `whiskers.exe`).
+
+`install.bat` copies the exe to `%LOCALAPPDATA%\Programs\whiskers` and adds it to
+your PATH, so you can launch it from any terminal with:
+
+```
+whiskers
+```
+
+## Build from source
 
 ```
 cargo build --release
 ```
 
-Run the resulting binary at `target\release\sshtunnelcli.exe` (or `cargo run`).
-
-### Keys
+## Keys
 
 From the tunnel list:
 
 | Key | Action |
 |-----|--------|
 | `Enter` | Run / stop the selected tunnel |
+| `j` / `k` or arrows | Navigate |
+| `/` | Search (match name, host, ports, jump hosts) |
 | `n` | Create a new tunnel |
 | `e` | Edit the selected tunnel |
 | `d` | Delete the selected tunnel |
 | `q` | Quit (saves config) |
 
-From the create/edit form:
+From the create/edit form (`Tab` cycles fields):
 
 | Key | Action |
 |-----|--------|
-| `Tab` | Next input field |
-| `a` | Add a jump host |
+| `Tab` | Next field: Name → Local Port → Jumps → Target Host → Target Port |
+| `a` | Add a jump host (when on Jumps) |
 | `e` | Edit the selected jump host |
 | `x` | Remove the selected jump host |
+| `j` / `k` | Move between jump hosts |
 | `Enter` | Save |
 | `Esc` | Back to list |
 

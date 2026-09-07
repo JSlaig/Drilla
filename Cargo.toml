@@ -1,5 +1,5 @@
 [package]
-name = "sshtunnelcli"
+name = "whiskers"
 version = "0.1.0"
 edition = "2024"
 
@@ -11,5 +11,5 @@ serde_json = "1"
 dirs = "6"
 
 [[bin]]
-name = "sshtunnelcli"
+name = "whiskers"
 path = "src/main.rs"

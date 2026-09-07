@@ -14,6 +14,7 @@ impl ConfigStore {
         Self { path }
     }
 
+    #[cfg(test)]
     pub fn with_path(path: PathBuf) -> Self {
         Self { path }
     }
