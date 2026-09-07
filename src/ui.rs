@@ -146,7 +146,7 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::new(Direction::Vertical, [
         Constraint::Length(5),
         Constraint::Min(4),
-        Constraint::Length(5),
+        Constraint::Length(7),
     ])
     .split(inner);
 
@@ -198,7 +198,12 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
             } else {
                 format!("{}@", j.user)
             };
-            ListItem::new(format!("  {} {}{}:{}", i + 1, user, j.host, j.port)).style(if i == form.selected_jump {
+            let pwd = if j.password.as_ref().map(|p| !p.is_empty()).unwrap_or(false) {
+                " [pwd]"
+            } else {
+                ""
+            };
+            ListItem::new(format!("  {} {}{}:{}{}", i + 1, user, j.host, j.port, pwd)).style(if i == form.selected_jump {
                 Style::default()
                     .bg(Color::DarkGray)
                     .fg(Color::White)
@@ -220,25 +225,38 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     // Bottom target fields
-    let bottom = Layout::new(Direction::Horizontal, [
-        Constraint::Percentage(75),
-        Constraint::Percentage(25),
+    let bottom = Layout::new(Direction::Vertical, [
+        Constraint::Length(3),
+        Constraint::Length(3),
     ])
     .split(chunks[2]);
 
+    let target_top = Layout::new(Direction::Horizontal, [
+        Constraint::Percentage(75),
+        Constraint::Percentage(25),
+    ])
+    .split(bottom[0]);
+
     draw_input(
         frame,
-        bottom[0],
+        target_top[0],
         "Target Host",
         &form.target_host,
         form.input == InputField::TargetHost,
     );
     draw_input(
         frame,
-        bottom[1],
+        target_top[1],
         "Target Port",
         &form.target_port,
         form.input == InputField::TargetPort,
+    );
+    draw_input_masked(
+        frame,
+        bottom[1],
+        "Target Password (optional)",
+        &form.target_password,
+        form.input == InputField::TargetPassword,
     );
 
     if let Some(err) = &form.error {
@@ -271,15 +289,24 @@ fn draw_jump_form(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(block, area);
 
     let chunks = Layout::new(Direction::Vertical, [
-        Constraint::Length(5),
         Constraint::Length(3),
-        Constraint::Min(2),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Length(3),
+        Constraint::Min(1),
     ])
     .split(inner);
 
     draw_input(frame, chunks[0], "User (optional)", &form.user, form.input == JumpField::User);
     draw_input(frame, chunks[1], "Host", &form.host, form.input == JumpField::Host);
     draw_input(frame, chunks[2], "Port (22)", &form.port, form.input == JumpField::Port);
+    draw_input_masked(
+        frame,
+        chunks[3],
+        "Password (optional)",
+        &form.password,
+        form.input == JumpField::Password,
+    );
 
     if let Some(err) = &form.error {
         let err_text = format!("Error: {}", err);
@@ -292,6 +319,11 @@ fn draw_jump_form(frame: &mut Frame, app: &App, area: Rect) {
             height: 1,
         });
     }
+}
+
+fn draw_input_masked(frame: &mut Frame, area: Rect, label: &str, value: &str, focused: bool) {
+    let masked: String = "*".repeat(value.chars().count());
+    draw_input(frame, area, label, &masked, focused)
 }
 
 fn draw_input(frame: &mut Frame, area: Rect, label: &str, value: &str, focused: bool) {

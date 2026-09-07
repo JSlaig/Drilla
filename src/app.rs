@@ -34,6 +34,7 @@ pub enum InputField {
     Jumps,
     TargetHost,
     TargetPort,
+    TargetPassword,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +42,7 @@ pub enum JumpField {
     User,
     Host,
     Port,
+    Password,
 }
 
 pub struct FormState {
@@ -48,6 +50,7 @@ pub struct FormState {
     pub local_port: String,
     pub target_host: String,
     pub target_port: String,
+    pub target_password: String,
     pub jumps: Vec<JumpHost>,
     pub selected_jump: usize,
     pub input: InputField,
@@ -63,6 +66,7 @@ impl FormState {
             local_port: String::new(),
             target_host: String::new(),
             target_port: String::new(),
+            target_password: String::new(),
             jumps: Vec::new(),
             selected_jump: 0,
             input: InputField::Name,
@@ -78,6 +82,7 @@ impl FormState {
             local_port: tunnel.local_port.to_string(),
             target_host: tunnel.target.host.clone(),
             target_port: tunnel.target.port.to_string(),
+            target_password: tunnel.target.password.clone().unwrap_or_default(),
             jumps: tunnel.jumps.clone(),
             selected_jump: 0,
             input: InputField::Name,
@@ -102,12 +107,21 @@ impl FormState {
         } else {
             parse_port(&self.target_port)?
         };
+        let target_password = {
+            let p = self.target_password.trim().to_string();
+            if p.is_empty() {
+                None
+            } else {
+                Some(p)
+            }
+        };
         Ok(Tunnel {
             name,
             jumps: self.jumps.clone(),
             target: Target {
                 host: target_host,
                 port: target_port,
+                password: target_password,
             },
             local_port,
         })
@@ -119,7 +133,8 @@ impl FormState {
             InputField::LocalPort => InputField::Jumps,
             InputField::Jumps => InputField::TargetHost,
             InputField::TargetHost => InputField::TargetPort,
-            InputField::TargetPort => InputField::Name,
+            InputField::TargetPort => InputField::TargetPassword,
+            InputField::TargetPassword => InputField::Name,
         };
     }
 }
@@ -128,6 +143,7 @@ pub struct JumpFormState {
     pub user: String,
     pub host: String,
     pub port: String,
+    pub password: String,
     pub input: JumpField,
     pub error: Option<String>,
     pub edit_index: Option<usize>,
@@ -139,6 +155,7 @@ impl JumpFormState {
             user: String::new(),
             host: String::new(),
             port: String::new(),
+            password: String::new(),
             input: JumpField::Host,
             error: None,
             edit_index: None,
@@ -150,6 +167,7 @@ impl JumpFormState {
             user: jump.user.clone(),
             host: jump.host.clone(),
             port: jump.port.to_string(),
+            password: jump.password.clone().unwrap_or_default(),
             input: JumpField::Host,
             error: None,
             edit_index: Some(index),
@@ -166,10 +184,19 @@ impl JumpFormState {
         } else {
             parse_port(&self.port)?
         };
+        let password = {
+            let p = self.password.trim().to_string();
+            if p.is_empty() {
+                None
+            } else {
+                Some(p)
+            }
+        };
         Ok(JumpHost {
             user: self.user.trim().to_string(),
             host,
             port,
+            password,
         })
     }
 
@@ -177,7 +204,8 @@ impl JumpFormState {
         self.input = match self.input {
             JumpField::Host => JumpField::User,
             JumpField::User => JumpField::Port,
-            JumpField::Port => JumpField::Host,
+            JumpField::Port => JumpField::Password,
+            JumpField::Password => JumpField::Host,
         };
     }
 }
@@ -410,6 +438,7 @@ impl App {
                             InputField::LocalPort => self.form.local_port.push(c),
                             InputField::TargetHost => self.form.target_host.push(c),
                             InputField::TargetPort => self.form.target_port.push(c),
+                            InputField::TargetPassword => self.form.target_password.push(c),
                             InputField::Jumps => {}
                         },
                         KeyCode::Backspace => match self.form.input {
@@ -424,6 +453,9 @@ impl App {
                             }
                             InputField::TargetPort => {
                                 self.form.target_port.pop();
+                            }
+                            InputField::TargetPassword => {
+                                self.form.target_password.pop();
                             }
                             InputField::Jumps => {}
                         },
@@ -469,6 +501,7 @@ impl App {
                 JumpField::User => self.jump_form.user.push(c),
                 JumpField::Host => self.jump_form.host.push(c),
                 JumpField::Port => self.jump_form.port.push(c),
+                JumpField::Password => self.jump_form.password.push(c),
             },
             KeyCode::Backspace => match self.jump_form.input {
                 JumpField::User => {
@@ -479,6 +512,9 @@ impl App {
                 }
                 JumpField::Port => {
                     self.jump_form.port.pop();
+                }
+                JumpField::Password => {
+                    self.jump_form.password.pop();
                 }
             },
             _ => {}
@@ -551,7 +587,7 @@ mod tests {
         app.handle_key(key(KeyCode::Tab)); // -> Jumps
         assert_eq!(app.form.input, InputField::Jumps);
 
-        // Add jump #1
+// Add jump #1 (with a password)
         app.handle_key(key(KeyCode::Char('a')));
         assert_eq!(app.screen, Screen::JumpAdd);
         assert_eq!(app.jump_form.input, JumpField::Host);
@@ -562,10 +598,14 @@ mod tests {
         app.handle_key(key(KeyCode::Tab)); // -> Port
         assert_eq!(app.jump_form.input, JumpField::Port);
         type_text(&mut app, "2222");
+        app.handle_key(key(KeyCode::Tab)); // -> Password
+        assert_eq!(app.jump_form.input, JumpField::Password);
+        type_text(&mut app, "hunter2");
         app.handle_key(key(KeyCode::Enter));
         assert_eq!(app.screen, Screen::Create);
         assert_eq!(app.form.jumps.len(), 1);
         assert_eq!(app.form.input, InputField::Jumps);
+        assert_eq!(app.form.jumps[0].password.as_deref(), Some("hunter2"));
 
         // Add jump #2
         app.handle_key(key(KeyCode::Char('a')));
@@ -575,9 +615,10 @@ mod tests {
         type_text(&mut app, "ops");
         app.handle_key(key(KeyCode::Tab));
         type_text(&mut app, "22");
-        app.handle_key(key(KeyCode::Enter));
+        app.handle_key(key(KeyCode::Enter)); // skip password
         assert_eq!(app.screen, Screen::Create);
         assert_eq!(app.form.jumps.len(), 2);
+        assert_eq!(app.form.jumps[1].password, None);
 
         // Tab -> TargetHost, type (contains 'a')
         app.handle_key(key(KeyCode::Tab));
@@ -588,6 +629,10 @@ mod tests {
         app.handle_key(key(KeyCode::Tab));
         assert_eq!(app.form.input, InputField::TargetPort);
         type_text(&mut app, "443");
+        // Tab -> TargetPassword
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.form.input, InputField::TargetPassword);
+        type_text(&mut app, "finalloc");
 
         // Save
         app.handle_key(key(KeyCode::Enter));
@@ -598,14 +643,17 @@ mod tests {
         assert_eq!(t.name, "ProdAPI eu-1 a");
         assert_eq!(t.local_port, 8443);
         assert_eq!(t.target.host, "api.internal.example.com");
-        assert_eq!(t.target.port, 443);
+assert_eq!(t.target.port, 443);
+        assert_eq!(t.target.password.as_deref(), Some("finalloc"));
         assert_eq!(t.jumps.len(), 2);
         assert_eq!(t.jumps[0].host, "bastion.example.com");
         assert_eq!(t.jumps[0].user, "alice");
         assert_eq!(t.jumps[0].port, 2222);
+        assert_eq!(t.jumps[0].password.as_deref(), Some("hunter2"));
         assert_eq!(t.jumps[1].host, "bastion2.example.com");
         assert_eq!(t.jumps[1].user, "ops");
         assert_eq!(t.jumps[1].port, 22);
+        assert_eq!(t.jumps[1].password, None);
 
         // Verify it was persisted to disk
         let saved = app.store.load();
@@ -621,6 +669,7 @@ mod tests {
             target: Target {
                 host: "h".into(),
                 port: 22,
+                password: None,
             },
             local_port: 1
         });
@@ -642,13 +691,13 @@ mod tests {
             Tunnel {
                 name: "Alpha".into(),
                 jumps: vec![],
-                target: Target { host: "a.example.com".into(), port: 22 },
+                target: Target { host: "a.example.com".into(), port: 22, password: None },
                 local_port: 1
             },
             Tunnel {
                 name: "Beta".into(),
                 jumps: vec![],
-                target: Target { host: "b.example.com".into(), port: 22 },
+                target: Target { host: "b.example.com".into(), port: 22, password: None },
                 local_port: 2
             },
         ];
@@ -674,19 +723,19 @@ mod tests {
             Tunnel {
                 name: "One".into(),
                 jumps: vec![],
-                target: Target { host: "1.example.com".into(), port: 22 },
+                target: Target { host: "1.example.com".into(), port: 22, password: None },
                 local_port: 1
             },
             Tunnel {
                 name: "Two".into(),
                 jumps: vec![],
-                target: Target { host: "2.example.com".into(), port: 22 },
+                target: Target { host: "2.example.com".into(), port: 22, password: None },
                 local_port: 2
             },
             Tunnel {
                 name: "Three".into(),
                 jumps: vec![],
-                target: Target { host: "3.example.com".into(), port: 22 },
+                target: Target { host: "3.example.com".into(), port: 22, password: None },
                 local_port: 3
             },
         ];

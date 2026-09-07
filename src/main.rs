@@ -18,6 +18,11 @@ use app::App;
 use event::Event;
 
 fn main() -> io::Result<()> {
+    // When ssh invokes this executable as SSH_ASKPASS, just answer the prompt.
+    if std::env::var("WHISKERS_ASKPASS_MODE").as_deref() == Ok("1") {
+        std::process::exit(ssh::run_askpass());
+    }
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
