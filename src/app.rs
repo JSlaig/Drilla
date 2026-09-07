@@ -30,6 +30,7 @@ impl ListState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputField {
     Name,
+    Folder,
     LocalPort,
     Jumps,
     TargetHost,
@@ -48,6 +49,7 @@ pub enum JumpField {
 
 pub struct FormState {
     pub name: String,
+    pub folder: String,
     pub local_port: String,
     pub target_host: String,
     pub target_port: String,
@@ -65,6 +67,7 @@ impl FormState {
     pub fn new_empty() -> Self {
         Self {
             name: String::new(),
+            folder: String::new(),
             local_port: String::new(),
             target_host: String::new(),
             target_port: String::new(),
@@ -82,6 +85,7 @@ impl FormState {
     pub fn from_tunnel(tunnel: &Tunnel, index: usize) -> Self {
         Self {
             name: tunnel.name.clone(),
+            folder: tunnel.folder.clone(),
             local_port: tunnel.local_port.to_string(),
             target_host: tunnel.target.host.clone(),
             target_port: tunnel.target.port.to_string(),
@@ -122,6 +126,7 @@ impl FormState {
         Ok(Tunnel {
             name,
             jumps: self.jumps.clone(),
+            folder: self.folder.trim().to_string(),
             target: Target {
                 host: target_host,
                 port: target_port,
@@ -134,7 +139,8 @@ impl FormState {
 
     pub fn cycle_input(&mut self) {
         self.input = match self.input {
-            InputField::Name => InputField::LocalPort,
+            InputField::Name => InputField::Folder,
+            InputField::Folder => InputField::LocalPort,
             InputField::LocalPort => InputField::Jumps,
             InputField::Jumps => InputField::TargetHost,
             InputField::TargetHost => InputField::TargetPort,
@@ -224,6 +230,18 @@ fn parse_port(s: &str) -> Result<u16, String> {
     Ok(port)
 }
 
+/// Pick a non-colliding name for a duplicated tunnel: "name (copy)",
+/// "name (copy 2)", ... until free.
+fn unique_copy_name(config: &Config, base: &str) -> String {
+    let mut candidate = format!("{} (copy)", base);
+    let mut n = 2;
+    while config.tunnels.iter().any(|t| t.name == candidate) {
+        candidate = format!("{} (copy {})", base, n);
+        n += 1;
+    }
+    candidate
+}
+
 pub struct App {
     pub screen: Screen,
     pub list: ListState,
@@ -235,6 +253,15 @@ pub struct App {
     pub status: Option<String>,
     pub search: String,
     pub search_mode: bool,
+    // index (real tunnel idx) awaiting a y/N delete confirmation
+    pub confirming_delete: Option<usize>,
+}
+
+/// One row of the tunnel list: either a folder group header or a tunnel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ListRow {
+    Header(String),
+    Tunnel(usize),
 }
 
 impl App {
@@ -247,7 +274,7 @@ pub fn new_with_store(store: ConfigStore) -> Self {
         let mut ssh = SshManager::new();
         let names: Vec<String> = config.tunnels.iter().map(|t| t.name.clone()).collect();
         ssh.refresh_all(&names);
-Self {
+        let mut app = Self {
             screen: Screen::List,
             list: ListState { selected: 0 },
             form: FormState::new_empty(),
@@ -258,7 +285,10 @@ Self {
             status: None,
             search: String::new(),
             search_mode: false,
-        }
+            confirming_delete: None,
+        };
+        app.snap_selection();
+        app
     }
         pub fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
         match self.screen {
@@ -268,7 +298,7 @@ Self {
         }
     }
 
-    pub fn visible_tunnels(&self) -> Vec<usize> {
+pub fn visible_tunnels(&self) -> Vec<usize> {
         let q = self.search.trim().to_lowercase();
         if q.is_empty() {
             return (0..self.config.tunnels.len()).collect();
@@ -291,7 +321,84 @@ Self {
             .collect()
     }
 
-    fn handle_list_key(&mut self, key: crossterm::event::KeyEvent) {
+    /// Display rows: ungrouped tunnels first, then folder groups headed by a
+    /// Header row. `list.selected` indexes into this row list.
+    pub fn visible_rows(&self) -> Vec<ListRow> {
+        let mut vis = self.visible_tunnels();
+        vis.sort_by_key(|&i| {
+            let f = self.config.tunnels[i].folder.trim().to_lowercase();
+            let has_folder = !f.is_empty();
+            (has_folder, f)
+        });
+        let mut rows: Vec<ListRow> = Vec::new();
+        let mut current_folder: Option<String> = None;
+        for &idx in &vis {
+            let folder = self.config.tunnels[idx].folder.trim().to_string();
+            let changed = match &current_folder {
+                Some(cf) => cf != &folder,
+                None => !folder.is_empty(),
+            };
+            if changed {
+                if !folder.is_empty() {
+                    rows.push(ListRow::Header(folder.clone()));
+                }
+                current_folder = Some(folder);
+            }
+            rows.push(ListRow::Tunnel(idx));
+        }
+        rows
+    }
+
+    /// Real tunnel index for the currently selected row, if it is a tunnel.
+    pub fn selected_tunnel(&self) -> Option<usize> {
+        match self.visible_rows().get(self.list.selected) {
+            Some(ListRow::Tunnel(idx)) => Some(*idx),
+            _ => None,
+        }
+    }
+
+    /// Keep `list.selected` on a Tunnel row (not a folder Header), moving to
+    /// the nearest one if needed.
+    fn snap_selection(&mut self) {
+        let rows = self.visible_rows();
+        if rows.is_empty() {
+            return;
+        }
+        if matches!(rows.get(self.list.selected), Some(ListRow::Tunnel(_))) {
+            return;
+        }
+        for i in self.list.selected + 1..rows.len() {
+            if matches!(rows.get(i), Some(ListRow::Tunnel(_))) {
+                self.list.selected = i;
+                return;
+            }
+        }
+        for i in (0..self.list.selected).rev() {
+            if matches!(rows.get(i), Some(ListRow::Tunnel(_))) {
+                self.list.selected = i;
+                return;
+            }
+        }
+    }
+
+    /// Move the selection by `dir` rows, skipping folder Header rows.
+    fn move_selection(&mut self, dir: i32) {
+        let rows = self.visible_rows();
+        let len = rows.len();
+        if len == 0 {
+            return;
+        }
+        let mut i = self.list.selected as i32 + dir;
+        while i >= 0 && i < len as i32 {
+            if matches!(rows.get(i as usize), Some(ListRow::Tunnel(_))) {
+                self.list.selected = i as usize;
+                return;
+            }
+            i += dir;
+        }
+    }
+
+fn handle_list_key(&mut self, key: crossterm::event::KeyEvent) {
         if self.search_mode {
             match key.code {
                 KeyCode::Esc => {
@@ -309,30 +416,48 @@ Self {
                 }
                 _ => {}
             }
-            let vis = self.visible_tunnels().len();
-            self.list.clamp(vis);
+            let rows = self.visible_rows().len();
+            self.list.clamp(rows);
+            self.snap_selection();
+            return;
+        }
+
+        // While a delete confirmation is up, only y / n / Esc / Enter matter.
+        if let Some(idx) = self.confirming_delete {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Enter => {
+                    let name = self.config.tunnels.get(idx).map(|t| t.name.clone());
+                    if let Some(name) = name {
+                        let _ = self.ssh.stop(&name);
+                        self.config.tunnels.remove(idx);
+                        self.list.clamp(self.visible_rows().len());
+                        self.snap_selection();
+                        let _ = self.store.save(&self.config);
+                        self.status = Some(format!("Deleted '{name}'"));
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Esc => {
+                    self.status = Some("Delete cancelled.".to_string());
+                }
+                _ => return,
+            }
+            self.confirming_delete = None;
             return;
         }
 
         match key.code {
             KeyCode::Up | KeyCode::Char('k') => {
-                if self.list.selected > 0 {
-                    self.list.selected -= 1;
-                }
+                self.move_selection(-1);
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                let vis = self.visible_tunnels().len();
-                if vis > 0 && self.list.selected + 1 < vis {
-                    self.list.selected += 1;
-                }
+                self.move_selection(1);
             }
             KeyCode::Char('/') => {
                 self.search.clear();
                 self.search_mode = true;
             }
-KeyCode::Enter => {
-                let vis = self.visible_tunnels();
-                if let Some(&idx) = vis.get(self.list.selected) {
+            KeyCode::Enter => {
+                if let Some(idx) = self.selected_tunnel() {
                     let name = self.config.tunnels[idx].name.clone();
                     if self.ssh.is_running(&name) {
                         match self.ssh.stop(&name) {
@@ -353,9 +478,20 @@ KeyCode::Enter => {
                 self.status = None;
                 self.screen = Screen::Create;
             }
+            KeyCode::Char('c') => {
+                if let Some(idx) = self.selected_tunnel() {
+                    let name = unique_copy_name(&self.config, &self.config.tunnels[idx].name);
+                    let mut copy = self.config.tunnels[idx].clone();
+                    copy.name = name.clone();
+                    self.config.tunnels.insert(idx + 1, copy);
+                    self.list.clamp(self.visible_rows().len());
+                    self.snap_selection();
+                    let _ = self.store.save(&self.config);
+                    self.status = Some(format!("Duplicated as '{name}'"));
+                }
+            }
             KeyCode::Char('e') => {
-                let vis = self.visible_tunnels();
-                if let Some(&idx) = vis.get(self.list.selected) {
+                if let Some(idx) = self.selected_tunnel() {
                     let tunnel = self.config.tunnels[idx].clone();
                     self.form = FormState::from_tunnel(&tunnel, idx);
                     self.status = None;
@@ -363,14 +499,10 @@ KeyCode::Enter => {
                 }
             }
             KeyCode::Char('d') => {
-                let vis = self.visible_tunnels();
-                if let Some(&idx) = vis.get(self.list.selected) {
-                    let name = self.config.tunnels[idx].name.clone();
-                    let _ = self.ssh.stop(&name);
-self.config.tunnels.remove(idx);
-                    self.list.clamp(self.visible_tunnels().len());
-                    let _ = self.store.save(&self.config);
-                    self.status = Some(format!("Deleted '{name}'"));
+                if let Some(idx) = self.selected_tunnel() {
+                    self.confirming_delete = Some(idx);
+                    let name = &self.config.tunnels[idx].name;
+                    self.status = Some(format!("Delete '{name}'? (y/n)"));
                 }
             }
             KeyCode::Char('q') => {
@@ -441,6 +573,7 @@ self.config.tunnels.remove(idx);
 match key.code {
                         KeyCode::Char(c) => match self.form.input {
                             InputField::Name => self.form.name.push(c),
+                            InputField::Folder => self.form.folder.push(c),
                             InputField::LocalPort => self.form.local_port.push(c),
                             InputField::TargetHost => self.form.target_host.push(c),
                             InputField::TargetPort => self.form.target_port.push(c),
@@ -451,6 +584,9 @@ match key.code {
                         KeyCode::Backspace => match self.form.input {
                             InputField::Name => {
                                 self.form.name.pop();
+                            }
+                            InputField::Folder => {
+                                self.form.folder.pop();
                             }
                             InputField::LocalPort => {
                                 self.form.local_port.pop();
@@ -588,6 +724,9 @@ fn temp_app(name: &str) -> App {
         // Name (contains letters that used to be intercepted: a, e, x)
         type_text(&mut app, "ProdAPI eu-1 a");
         assert_eq!(app.form.name, "ProdAPI eu-1 a");
+        app.handle_key(key(KeyCode::Tab)); // -> Folder
+        assert_eq!(app.form.input, InputField::Folder);
+        type_text(&mut app, "prod");
         app.handle_key(key(KeyCode::Tab)); // -> LocalPort
         assert_eq!(app.form.input, InputField::LocalPort);
         type_text(&mut app, "8443");
@@ -655,6 +794,7 @@ fn temp_app(name: &str) -> App {
 
         let t = &app.config.tunnels[0];
         assert_eq!(t.name, "ProdAPI eu-1 a");
+        assert_eq!(t.folder, "prod");
         assert_eq!(t.local_port, 8443);
         assert_eq!(t.target.host, "api.internal.example.com");
         assert_eq!(t.legacy, true);
@@ -687,6 +827,7 @@ assert_eq!(t.target.port, 443);
                 password: None,
             },
             local_port: 1,
+        folder: "".into(),
         legacy: false,
         });
 
@@ -709,6 +850,7 @@ assert_eq!(t.target.port, 443);
                 jumps: vec![],
                 target: Target { host: "a.example.com".into(), port: 22, password: None },
                 local_port: 1,
+            folder: "".into(),
             legacy: false,
             },
             Tunnel {
@@ -716,6 +858,7 @@ assert_eq!(t.target.port, 443);
                 jumps: vec![],
                 target: Target { host: "b.example.com".into(), port: 22, password: None },
                 local_port: 2,
+            folder: "".into(),
             legacy: false,
             },
         ];
@@ -751,6 +894,7 @@ assert_eq!(t.target.port, 443);
                 password: None,
             },
             local_port: 5678,
+        folder: "".into(),
         legacy: false,
         });
 
@@ -780,6 +924,7 @@ assert_eq!(t.target.port, 443);
                 jumps: vec![],
                 target: Target { host: "1.example.com".into(), port: 22, password: None },
                 local_port: 1,
+            folder: "".into(),
             legacy: false,
             },
             Tunnel {
@@ -787,6 +932,7 @@ assert_eq!(t.target.port, 443);
                 jumps: vec![],
                 target: Target { host: "2.example.com".into(), port: 22, password: None },
                 local_port: 2,
+            folder: "".into(),
             legacy: false,
             },
             Tunnel {
@@ -794,6 +940,7 @@ assert_eq!(t.target.port, 443);
                 jumps: vec![],
                 target: Target { host: "3.example.com".into(), port: 22, password: None },
                 local_port: 3,
+            folder: "".into(),
             legacy: false,
             },
         ];
@@ -808,10 +955,117 @@ assert_eq!(t.target.port, 443);
         app.handle_key(key(KeyCode::Char('k')));
         assert_eq!(app.list.selected, 1);
 
-        // 'd' deletes the selected tunnel
+        // 'd' asks for confirmation before deleting the selected tunnel
         app.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(app.confirming_delete, Some(1));
+        assert_eq!(app.config.tunnels.len(), 3);
+        // 'n' cancels
+        app.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(app.config.tunnels.len(), 3);
+        assert_eq!(app.confirming_delete, None);
+
+        // Ask again, then confirm with 'y'
+        app.handle_key(key(KeyCode::Char('d')));
+        assert_eq!(app.confirming_delete, Some(1));
+        app.handle_key(key(KeyCode::Char('y')));
         assert_eq!(app.config.tunnels.len(), 2);
         assert_eq!(app.config.tunnels[0].name, "One");
         assert_eq!(app.config.tunnels[1].name, "Three");
+    }
+
+    #[test]
+    fn duplicate_tunnel_inserts_copy_after_original() {
+        let mut app = temp_app("dup");
+        app.config.tunnels = vec![
+            Tunnel {
+                name: "One".into(),
+                jumps: vec![],
+                target: Target { host: "1.example.com".into(), port: 22, password: None },
+                local_port: 1,
+            folder: "api".into(),
+            legacy: true,
+            },
+        ];
+        app.list.clamp(app.visible_rows().len());
+        app.snap_selection();
+        assert_eq!(app.selected_tunnel(), Some(0));
+
+        app.handle_key(key(KeyCode::Char('c')));
+        assert_eq!(app.config.tunnels.len(), 2);
+        assert_eq!(app.config.tunnels[0].name, "One");
+        assert_eq!(app.config.tunnels[1].name, "One (copy)");
+        assert_eq!(app.config.tunnels[1].folder, "api");
+        assert_eq!(app.config.tunnels[1].legacy, true);
+        assert_eq!(app.config.tunnels[1].local_port, 1);
+
+        // Duplicate again -> picks a new unique name for the copy of the
+        // still-selected original, inserted right after it.
+        app.handle_key(key(KeyCode::Char('c')));
+        assert_eq!(app.config.tunnels.len(), 3);
+        assert_eq!(app.config.tunnels[1].name, "One (copy 2)");
+
+        // Persisted
+        assert_eq!(app.store.load().tunnels.len(), 3);
+    }
+
+    #[test]
+    fn folder_rows_group_tunnels_under_headers() {
+        let mut app = temp_app("folders");
+        app.config.tunnels = vec![
+            Tunnel {
+                name: "A".into(),
+                jumps: vec![],
+                target: Target { host: "h1".into(), port: 22, password: None },
+                local_port: 1,
+            folder: "prod".into(),
+            legacy: false,
+            },
+            Tunnel {
+                name: "B".into(),
+                jumps: vec![],
+                target: Target { host: "h2".into(), port: 22, password: None },
+                local_port: 2,
+            folder: "".into(),
+            legacy: false,
+            },
+            Tunnel {
+                name: "C".into(),
+                jumps: vec![],
+                target: Target { host: "h3".into(), port: 22, password: None },
+                local_port: 3,
+            folder: "prod".into(),
+            legacy: false,
+            },
+            Tunnel {
+                name: "D".into(),
+                jumps: vec![],
+                target: Target { host: "h4".into(), port: 22, password: None },
+                local_port: 4,
+            folder: "staging".into(),
+            legacy: false,
+            },
+        ];
+
+        let rows = app.visible_rows();
+        let kinds: Vec<String> = rows
+            .iter()
+            .map(|r| match r {
+                ListRow::Header(f) => format!("H:{}", f),
+                ListRow::Tunnel(i) => format!("T:{}", app.config.tunnels[*i].name),
+            })
+            .collect();
+        // Empty-folder tunnels first, then folders alphabetically, each
+        // headed by a Header row.
+        assert_eq!(
+            kinds,
+            vec![
+                "T:B",
+                "H:prod",
+                "T:A",
+                "T:C",
+                "H:staging",
+                "T:D",
+            ]
+        );
     }
 }

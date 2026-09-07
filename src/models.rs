@@ -26,6 +26,8 @@ pub struct Tunnel {
     pub target: Target,
     #[serde(default = "default_local_port")]
     pub local_port: u16,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder: String,
     #[serde(default, skip_serializing_if = "is_false")]
     pub legacy: bool,
 }

@@ -625,6 +625,7 @@ mod tests {
                 password: None,
             },
             local_port: 5433,
+        folder: "".into(),
         legacy: false,
         };
 
@@ -661,6 +662,7 @@ mod tests {
                 password: None,
             },
             local_port: 5433,
+            folder: "".into(),
             legacy: true,
         };
 
@@ -734,6 +736,7 @@ mod tests {
                 password: None,
             },
             local_port: 8443,
+            folder: "".into(),
             legacy: true,
         };
 
@@ -765,6 +768,7 @@ mod tests {
                 password: None,
             },
             local_port: 8080,
+        folder: "".into(),
         legacy: false,
         };
 
@@ -788,6 +792,7 @@ mod tests {
                 password: None,
             },
             local_port: 5432,
+        folder: "".into(),
         legacy: false,
         };
         let creds = credentials_for(&tunnel).unwrap();
@@ -809,6 +814,7 @@ mod tests {
                 password: Some("pass123".into()),
             },
             local_port: 8080,
+        folder: "".into(),
         legacy: false,
         };
         let creds = credentials_for(&tunnel).unwrap();
@@ -828,6 +834,7 @@ mod tests {
                 password: None,
             },
             local_port: 9999,
+            folder: "".into(),
             legacy: true,
         };
         let args = cmd_to_args(&build_ssh_command(&tunnel));
@@ -849,6 +856,7 @@ mod tests {
                 password: None,
             },
             local_port: 8080,
+            folder: "".into(),
             legacy: false,
         };
         let args = cmd_to_args(&build_ssh_command(&tunnel));
@@ -867,6 +875,7 @@ mod tests {
                 password: None,
             },
             local_port: 8080,
+        folder: "".into(),
         legacy: false,
         };
         assert!(credentials_for(&tunnel).is_none());

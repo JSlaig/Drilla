@@ -23,14 +23,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     match app.screen {
         Screen::List => {
-            let list_chunks = Layout::new(Direction::Vertical, [
-                Constraint::Min(8),
-                Constraint::Length(11),
+            let list_chunks = Layout::new(Direction::Horizontal, [
+                Constraint::Min(24),
+                Constraint::Length(46),
             ])
             .split(chunks[0]);
             draw_list(frame, app, list_chunks[0]);
             draw_details(frame, app, list_chunks[1]);
-            draw_list_hints(frame, chunks[1]);
+            draw_list_hints(frame, chunks[1], &status_text);
         }
         Screen::Create | Screen::Edit => {
             draw_form(frame, app, chunks[0]);
@@ -51,8 +51,7 @@ fn draw_details(frame: &mut Frame, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let vis = app.visible_tunnels();
-    let Some(&idx) = vis.get(app.list.selected) else {
+    let Some(idx) = app.selected_tunnel() else {
         let p = Paragraph::new("Nothing selected.")
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(p, inner);
@@ -90,10 +89,11 @@ fn draw_details(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_widget(p, inner);
 }
 
-fn draw_list_hints(frame: &mut Frame, area: Rect) {
-    let hints = Paragraph::new(
-        "Enter: run/stop | j/k: nav | /: search | n: new | e: edit | d: delete | q: quit",
-    )
+fn draw_list_hints(frame: &mut Frame, area: Rect, status: &str) {
+    let hints = Paragraph::new(format!(
+        "Enter: run/stop | j/k: nav | /: search | n: new | c: duplicate | e: edit | d: delete | q: quit\n{}",
+        status
+    ))
     .style(Style::default().fg(Color::DarkGray))
     .alignment(Alignment::Center);
     frame.render_widget(hints, area);
@@ -126,43 +126,78 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .border_type(BorderType::Rounded)
         .title_alignment(Alignment::Left);
 
-    let vis = app.visible_tunnels();
-    let names: Vec<&str> =
-        vis.iter().map(|&i| app.config.tunnels[i].name.as_str()).collect();
-    let statuses = app.ssh.running_snapshot(&names);
-
-    let rows_widgets: Vec<Row> = vis
+    let rows = app.visible_rows();
+    let tunnel_names: Vec<String> = rows
         .iter()
-        .enumerate()
-        .map(|(shown_idx, &real_idx)| {
-            let t = &app.config.tunnels[real_idx];
-            let style = if shown_idx == app.list.selected {
-                Style::default()
-                    .bg(Color::Blue)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            let running = statuses
-                .iter()
-                .find(|(name, _)| name == &t.name)
-                .map(|(_, r)| *r)
-                .unwrap_or(false);
-            let status = if running { "RUNNING" } else { "STOPPED" };
-            let is_target = format!("{}:{}", t.target.host, t.target.port);
-            let jumps = t.jumps.len().to_string();
-            Row::new(vec![
-                (shown_idx + 1).to_string(),
-                t.name.clone(),
-                status.to_string(),
-                t.local_port.to_string(),
-                is_target,
-                jumps,
-            ])
-            .style(style)
+        .filter_map(|r| match r {
+            crate::app::ListRow::Tunnel(i) => Some(app.config.tunnels[*i].name.clone()),
+            crate::app::ListRow::Header(_) => None,
         })
         .collect();
+    let statuses = app.ssh.running_snapshot(&tunnel_names.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+
+    let mut ord = 1;
+    let mut rows_widgets: Vec<Row> = Vec::new();
+    for (shown_idx, row) in rows.iter().enumerate() {
+        match row {
+            crate::app::ListRow::Header(folder) => {
+                let header_style = if shown_idx == app.list.selected {
+                    Style::default()
+                        .bg(Color::DarkGray)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD)
+                };
+                let label = format!(" {} ", folder);
+                rows_widgets.push(
+                    Row::new(vec![
+                        String::new(),
+                        label,
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                    ])
+                    .style(header_style),
+                );
+            }
+            crate::app::ListRow::Tunnel(real_idx) => {
+                let t = &app.config.tunnels[*real_idx];
+                let style = if shown_idx == app.list.selected {
+                    Style::default()
+                        .bg(Color::Blue)
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default()
+                };
+                let name = &t.name;
+                let running = statuses
+                    .iter()
+                    .find(|(n, _)| n == name)
+                    .map(|(_, r)| *r)
+                    .unwrap_or(false);
+                let status = if running { "RUNNING" } else { "STOPPED" };
+                let is_target = format!("{}:{}", t.target.host, t.target.port);
+                let jumps = t.jumps.len().to_string();
+                rows_widgets.push(
+                    Row::new(vec![
+                        ord.to_string(),
+                        t.name.clone(),
+                        status.to_string(),
+                        t.local_port.to_string(),
+                        is_target,
+                        jumps,
+                    ])
+                    .style(style),
+                );
+                ord += 1;
+            }
+        }
+    }
 
     let header = Row::new(vec!["#", "Name", "Status", "Local Port", "Target", "Jumps"])
         .style(Style::default().add_modifier(Modifier::BOLD));
@@ -221,9 +256,9 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
     draw_input(
         frame,
         top[1],
-        "Local Port",
-        &form.local_port,
-        form.input == InputField::LocalPort,
+        "Folder (optional)",
+        &form.folder,
+        form.input == InputField::Folder,
     );
 
     // Jumps list
@@ -287,21 +322,29 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
     .split(chunks[2]);
 
     let target_top = Layout::new(Direction::Horizontal, [
-        Constraint::Percentage(75),
         Constraint::Percentage(25),
+        Constraint::Percentage(55),
+        Constraint::Percentage(20),
     ])
     .split(bottom[0]);
 
     draw_input(
         frame,
         target_top[0],
+        "Local Port",
+        &form.local_port,
+        form.input == InputField::LocalPort,
+    );
+    draw_input(
+        frame,
+        target_top[1],
         "Target Host",
         &form.target_host,
         form.input == InputField::TargetHost,
     );
     draw_input(
         frame,
-        target_top[1],
+        target_top[2],
         "Target Port",
         &form.target_port,
         form.input == InputField::TargetPort,

@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "drilla"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "crossterm 0.29.0",
  "dirs",
