@@ -200,7 +200,7 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::new(Direction::Vertical, [
         Constraint::Length(5),
         Constraint::Min(4),
-        Constraint::Length(7),
+        Constraint::Length(9),
     ])
     .split(inner);
 
@@ -282,6 +282,7 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
     let bottom = Layout::new(Direction::Vertical, [
         Constraint::Length(3),
         Constraint::Length(3),
+        Constraint::Length(2),
     ])
     .split(chunks[2]);
 
@@ -312,6 +313,25 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
         &form.target_password,
         form.input == InputField::TargetPassword,
     );
+
+    let legacy_focused = form.input == InputField::Legacy;
+    let legacy_style = if legacy_focused {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if form.legacy {
+        Style::default().fg(Color::Green)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let marker = if form.legacy { "[x]" } else { "[ ]" };
+    let legacy_text = format!(
+        " {} Legacy algorithms (ssh-rsa/ssh-dss){}",
+        marker,
+        if legacy_focused { "  - press any key to toggle" } else { "" }
+    );
+    let legacy_para = Paragraph::new(legacy_text).style(legacy_style);
+    frame.render_widget(legacy_para, bottom[2]);
 
     if let Some(err) = &form.error {
         let err_text = format!("Error: {}", err);

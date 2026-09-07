@@ -26,6 +26,8 @@ pub struct Tunnel {
     pub target: Target,
     #[serde(default = "default_local_port")]
     pub local_port: u16,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub legacy: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -40,6 +42,10 @@ fn default_port() -> u16 {
 
 fn default_local_port() -> u16 {
     0
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Config {

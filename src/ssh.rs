@@ -261,6 +261,20 @@ pub fn build_ssh_command(tunnel: &Tunnel) -> Command {
     cmd.arg("-o").arg("StrictHostKeyChecking=accept-new");
     cmd.arg("-o").arg("ConnectTimeout=15");
 
+    if tunnel.legacy {
+        // Old servers only offer ssh-rsa / ssh-dss host keys; modern OpenSSH
+        // disables these by default, so re-enable them (plus the kex/ciphers
+        // such hardware-era servers need) for this tunnel only.
+        cmd.arg("-o")
+            .arg("HostKeyAlgorithms=+ssh-rsa,ssh-dss");
+        cmd.arg("-o").arg("PubkeyAcceptedAlgorithms=+ssh-rsa");
+        cmd.arg("-o")
+            .arg("KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1");
+        cmd.arg("-o")
+            .arg("Ciphers=+3des-cbc,aes128-cbc,aes192-cbc,aes256-cbc");
+        cmd.arg("-o").arg("MACs=+hmac-sha1,hmac-md5");
+    }
+
     if !tunnel.jumps.is_empty() {
         let jumps: Vec<String> = tunnel
             .jumps
@@ -364,6 +378,7 @@ mod tests {
                 password: None,
             },
             local_port: 5433,
+        legacy: false,
         };
 
         let args = cmd_to_args(&build_ssh_command(&tunnel));
@@ -396,6 +411,7 @@ mod tests {
                 password: None,
             },
             local_port: 8080,
+        legacy: false,
         };
 
         let args = cmd_to_args(&build_ssh_command(&tunnel));
@@ -418,6 +434,7 @@ mod tests {
                 password: None,
             },
             local_port: 5432,
+        legacy: false,
         };
         let creds = credentials_for(&tunnel).unwrap();
         assert_eq!(creds.len(), 2);
@@ -438,11 +455,51 @@ mod tests {
                 password: Some("pass123".into()),
             },
             local_port: 8080,
+        legacy: false,
         };
         let creds = credentials_for(&tunnel).unwrap();
         assert_eq!(creds.len(), 1);
         assert_eq!(creds[0].host, "server.example.com");
         assert_eq!(creds[0].password, "pass123");
+    }
+
+    #[test]
+    fn legacy_tunnel_enables_ssh_rsa_and_ssh_dss() {
+        let tunnel = Tunnel {
+            name: "legacy".into(),
+            jumps: vec![],
+            target: Target {
+                host: "oldbox.example.com".into(),
+                port: 22,
+                password: None,
+            },
+            local_port: 9999,
+            legacy: true,
+        };
+        let args = cmd_to_args(&build_ssh_command(&tunnel));
+        assert!(args.contains(&"-o".to_string()));
+        assert!(args.contains(&"HostKeyAlgorithms=+ssh-rsa,ssh-dss".to_string()));
+        assert!(args.contains(&"PubkeyAcceptedAlgorithms=+ssh-rsa".to_string()));
+        assert!(args.contains(&"KexAlgorithms=+diffie-hellman-group1-sha1,diffie-hellman-group14-sha1,diffie-hellman-group-exchange-sha1".to_string()));
+        assert!(args.contains(&"-L9999:oldbox.example.com:22".to_string()));
+    }
+
+    #[test]
+    fn legacy_toggle_off_has_no_legacy_options() {
+        let tunnel = Tunnel {
+            name: "modern".into(),
+            jumps: vec![],
+            target: Target {
+                host: "server.example.com".into(),
+                port: 22,
+                password: None,
+            },
+            local_port: 8080,
+            legacy: false,
+        };
+        let args = cmd_to_args(&build_ssh_command(&tunnel));
+        assert!(!args.contains(&"HostKeyAlgorithms=+ssh-rsa,ssh-dss".to_string()));
+        assert!(!args.contains(&"Ciphers=+3des-cbc,aes128-cbc,aes192-cbc,aes256-cbc".to_string()));
     }
 
     #[test]
@@ -456,6 +513,7 @@ mod tests {
                 password: None,
             },
             local_port: 8080,
+        legacy: false,
         };
         assert!(credentials_for(&tunnel).is_none());
     }

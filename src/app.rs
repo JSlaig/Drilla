@@ -35,6 +35,7 @@ pub enum InputField {
     TargetHost,
     TargetPort,
     TargetPassword,
+    Legacy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,6 +58,7 @@ pub struct FormState {
     pub error: Option<String>,
     pub is_edit: bool,
     pub edit_index: usize,
+    pub legacy: bool,
 }
 
 impl FormState {
@@ -73,6 +75,7 @@ impl FormState {
             error: None,
             is_edit: false,
             edit_index: 0,
+            legacy: false,
         }
     }
 
@@ -89,6 +92,7 @@ impl FormState {
             error: None,
             is_edit: true,
             edit_index: index,
+            legacy: tunnel.legacy,
         }
     }
 
@@ -124,6 +128,7 @@ impl FormState {
                 password: target_password,
             },
             local_port,
+            legacy: self.legacy,
         })
     }
 
@@ -134,7 +139,8 @@ impl FormState {
             InputField::Jumps => InputField::TargetHost,
             InputField::TargetHost => InputField::TargetPort,
             InputField::TargetPort => InputField::TargetPassword,
-            InputField::TargetPassword => InputField::Name,
+            InputField::TargetPassword => InputField::Legacy,
+            InputField::Legacy => InputField::Name,
         };
     }
 }
@@ -432,13 +438,14 @@ impl App {
                         _ => {}
                     }
                 } else {
-                    match key.code {
+match key.code {
                         KeyCode::Char(c) => match self.form.input {
                             InputField::Name => self.form.name.push(c),
                             InputField::LocalPort => self.form.local_port.push(c),
                             InputField::TargetHost => self.form.target_host.push(c),
                             InputField::TargetPort => self.form.target_port.push(c),
                             InputField::TargetPassword => self.form.target_password.push(c),
+                            InputField::Legacy => self.form.legacy = !self.form.legacy,
                             InputField::Jumps => {}
                         },
                         KeyCode::Backspace => match self.form.input {
@@ -457,7 +464,7 @@ impl App {
                             InputField::TargetPassword => {
                                 self.form.target_password.pop();
                             }
-                            InputField::Jumps => {}
+                            InputField::Legacy | InputField::Jumps => {}
                         },
                         _ => {}
                     }
@@ -629,10 +636,17 @@ mod tests {
         app.handle_key(key(KeyCode::Tab));
         assert_eq!(app.form.input, InputField::TargetPort);
         type_text(&mut app, "443");
-        // Tab -> TargetPassword
+// Tab -> TargetPassword
         app.handle_key(key(KeyCode::Tab));
         assert_eq!(app.form.input, InputField::TargetPassword);
         type_text(&mut app, "finalloc");
+        // Tab -> Legacy algorithms, toggle on with any char
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.form.input, InputField::Legacy);
+        app.handle_key(key(KeyCode::Char('t')));
+        assert!(app.form.legacy);
+        app.handle_key(key(KeyCode::Tab));
+        assert_eq!(app.form.input, InputField::Name);
 
         // Save
         app.handle_key(key(KeyCode::Enter));
@@ -643,6 +657,7 @@ mod tests {
         assert_eq!(t.name, "ProdAPI eu-1 a");
         assert_eq!(t.local_port, 8443);
         assert_eq!(t.target.host, "api.internal.example.com");
+        assert_eq!(t.legacy, true);
 assert_eq!(t.target.port, 443);
         assert_eq!(t.target.password.as_deref(), Some("finalloc"));
         assert_eq!(t.jumps.len(), 2);
@@ -671,7 +686,8 @@ assert_eq!(t.target.port, 443);
                 port: 22,
                 password: None,
             },
-            local_port: 1
+            local_port: 1,
+        legacy: false,
         });
 
         app.handle_key(key(KeyCode::Char('n')));
@@ -692,13 +708,15 @@ assert_eq!(t.target.port, 443);
                 name: "Alpha".into(),
                 jumps: vec![],
                 target: Target { host: "a.example.com".into(), port: 22, password: None },
-                local_port: 1
+                local_port: 1,
+            legacy: false,
             },
             Tunnel {
                 name: "Beta".into(),
                 jumps: vec![],
                 target: Target { host: "b.example.com".into(), port: 22, password: None },
-                local_port: 2
+                local_port: 2,
+            legacy: false,
             },
         ];
 
@@ -733,6 +751,7 @@ assert_eq!(t.target.port, 443);
                 password: None,
             },
             local_port: 5678,
+        legacy: false,
         });
 
         // Enter on the list starts the selected tunnel.
@@ -760,19 +779,22 @@ assert_eq!(t.target.port, 443);
                 name: "One".into(),
                 jumps: vec![],
                 target: Target { host: "1.example.com".into(), port: 22, password: None },
-                local_port: 1
+                local_port: 1,
+            legacy: false,
             },
             Tunnel {
                 name: "Two".into(),
                 jumps: vec![],
                 target: Target { host: "2.example.com".into(), port: 22, password: None },
-                local_port: 2
+                local_port: 2,
+            legacy: false,
             },
             Tunnel {
                 name: "Three".into(),
                 jumps: vec![],
                 target: Target { host: "3.example.com".into(), port: 22, password: None },
-                local_port: 3
+                local_port: 3,
+            legacy: false,
             },
         ];
 
