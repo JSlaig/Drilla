@@ -716,6 +716,42 @@ assert_eq!(t.target.port, 443);
         assert_eq!(app.visible_tunnels().len(), 2);
     }
 
+#[test]
+    fn failing_tunnel_captures_output() {
+        use std::time::{Duration, Instant};
+        // Guard against machines without OpenSSH on PATH.
+        if std::process::Command::new("ssh").arg("-V").output().is_err() {
+            return;
+        }
+        let mut app = temp_app("fail_capture");
+        app.config.tunnels.push(Tunnel {
+            name: "probe".into(),
+            jumps: vec![],
+            target: Target {
+                host: "localhost".into(),
+                port: 22,
+                password: None,
+            },
+            local_port: 5678,
+        });
+
+        // Enter on the list starts the selected tunnel.
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.ssh.is_running("probe"));
+
+        // Local sshd (when reachable) rejects keys and gets an empty askpass
+        // answer, so ssh should exit quickly and leave us its stderr output.
+        let deadline = Instant::now() + Duration::from_secs(25);
+        while Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(200));
+            if !app.ssh.is_running("probe") {
+                break;
+            }
+        }
+        let out = app.ssh.output("probe").unwrap_or("").to_string();
+        assert!(!out.is_empty(), "expected captured ssh output, got none");
+    }
+
     #[test]
     fn vim_navigation_and_delete() {
         let mut app = temp_app("vim_nav");

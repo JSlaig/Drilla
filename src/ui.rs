@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 use crate::app::{App, InputField, JumpField, Screen};
+use crate::ssh::format_command;
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let status_text = app
@@ -22,7 +23,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     match app.screen {
         Screen::List => {
-            draw_list(frame, app, chunks[0]);
+            let list_chunks = Layout::new(Direction::Vertical, [
+                Constraint::Min(8),
+                Constraint::Length(11),
+            ])
+            .split(chunks[0]);
+            draw_list(frame, app, list_chunks[0]);
+            draw_details(frame, app, list_chunks[1]);
             draw_list_hints(frame, chunks[1]);
         }
         Screen::Create | Screen::Edit => {
@@ -34,6 +41,53 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             draw_status_bar(frame, chunks[1], &status_text);
         }
     }
+}
+
+fn draw_details(frame: &mut Frame, app: &mut App, area: Rect) {
+    let block = Block::default()
+        .title(" Selected tunnel ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let vis = app.visible_tunnels();
+    let Some(&idx) = vis.get(app.list.selected) else {
+        let p = Paragraph::new("Nothing selected.")
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(p, inner);
+        return;
+    };
+    let tunnel = &app.config.tunnels[idx];
+    let cmd = format_command(tunnel);
+    let output = app
+        .ssh
+        .output(&tunnel.name)
+        .map(str::to_string)
+        .unwrap_or_else(|| "(no output yet)".to_string());
+    let jumps: String = if tunnel.jumps.is_empty() {
+        "(direct)".to_string()
+    } else {
+        tunnel
+            .jumps
+            .iter()
+            .map(|j| {
+                let user = if j.user.is_empty() {
+                    String::new()
+                } else {
+                    format!("{}@", j.user)
+                };
+                format!("{}{}:{}", user, j.host, j.port)
+            })
+            .collect::<Vec<_>>()
+            .join(" -> ")
+    };
+    let content = format!(
+        "Jumps: {}\nCommand: {}\nOutput: {}",
+        jumps, cmd, output
+    );
+    let p = Paragraph::new(content).wrap(Wrap { trim: false });
+    frame.render_widget(p, inner);
 }
 
 fn draw_list_hints(frame: &mut Frame, area: Rect) {

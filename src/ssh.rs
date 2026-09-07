@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -17,50 +18,61 @@ struct AskpassCred {
 }
 
 pub struct Running {
-    pub child: Child,
-    pub askpass: Option<PathBuf>,
+    child: Child,
+    askpass: Option<PathBuf>,
+    output: String,
 }
 
 pub struct SshManager {
     procs: HashMap<String, Running>,
+    outputs: HashMap<String, String>,
 }
 
 impl SshManager {
     pub fn new() -> Self {
         Self {
             procs: HashMap::new(),
+            outputs: HashMap::new(),
+        }
+    }
+
+    fn refresh(&mut self) {
+        let names: Vec<String> = self.procs.keys().cloned().collect();
+        for n in names {
+            let dead = match self.procs.get_mut(&n) {
+                Some(r) => match r.child.try_wait() {
+                    Ok(Some(_)) | Err(_) => true,
+                    Ok(None) => false,
+                },
+                None => false,
+            };
+            if dead {
+                if let Some(mut r) = self.procs.remove(&n) {
+                    r.drain_stderr();
+                    self.outputs.insert(n.clone(), r.output.clone());
+                    if let Some(p) = r.askpass {
+                        let _ = fs::remove_file(p);
+                    }
+                }
+            }
         }
     }
 
     pub fn is_running(&mut self, name: &str) -> bool {
-        if let Some(running) = self.procs.get_mut(name) {
-            match running.child.try_wait() {
-                Ok(Some(_)) => {
-                    self.remove(name);
-                    false
-                }
-                Ok(None) => true,
-                Err(_) => {
-                    self.remove(name);
-                    false
-                }
-            }
-        } else {
-            false
-        }
+        self.refresh();
+        self.procs.contains_key(name)
     }
 
     pub fn running_snapshot(&mut self, names: &[&str]) -> Vec<(String, bool)> {
+        self.refresh();
         names
             .iter()
-            .map(|name| {
-                let running = match self.procs.get_mut(*name) {
-                    Some(running) => running.child.try_wait().map(|s| s.is_none()).unwrap_or(false),
-                    None => false,
-                };
-                (name.to_string(), running)
-            })
+            .map(|name| (name.to_string(), self.procs.contains_key(*name)))
             .collect()
+    }
+
+    pub fn output(&self, name: &str) -> Option<&str> {
+        self.outputs.get(name).map(|s| s.as_str())
     }
 
     pub fn start(&mut self, tunnel: &Tunnel) -> Result<(), String> {
@@ -72,53 +84,62 @@ impl SshManager {
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::piped());
 
-        let askpass = match credentials_for(tunnel) {
-            Some(creds) if !creds.is_empty() => {
-                let path = write_askpass_file(&creds)?;
-                cmd.env("SSH_ASKPASS", askpass_program())
-                    .env("SSH_ASKPASS_REQUIRE", "force")
-                    .env("WHISKERS_ASKPASS_MODE", "1")
-                    .env("WHISKERS_ASKPASS_FILE", &path);
-                Some(path)
-            }
-            _ => None,
-        };
+        // Always arm the askpass helper: it answers configured passwords, and when
+        // key auth is rejected it makes ssh fail fast (empty answer) instead of
+        // hanging forever on a password prompt with no terminal.
+        let creds = credentials_for(tunnel).unwrap_or_default();
+        let path = write_askpass_file(&creds)?;
+        cmd.env("SSH_ASKPASS", askpass_program())
+            .env("SSH_ASKPASS_REQUIRE", "force")
+            .env("WHISKERS_ASKPASS_MODE", "1")
+            .env("WHISKERS_ASKPASS_FILE", &path);
 
         let child = cmd.spawn().map_err(|e| format!("failed to spawn ssh: {e}"))?;
-        self.procs.insert(
-            tunnel.name.clone(),
-            Running {
-                child,
-                askpass,
-            },
-        );
+        self.procs
+            .insert(
+                tunnel.name.clone(),
+                Running {
+                    child,
+                    askpass: Some(path),
+                    output: String::new(),
+                },
+            );
+        self.outputs.insert(tunnel.name.clone(), String::new());
         Ok(())
     }
 
     pub fn stop(&mut self, name: &str) -> Result<(), String> {
-        if self.procs.contains_key(name) {
-            if let Some(mut running) = self.procs.remove(name) {
-                let _ = running.child.kill();
-                let _ = running.child.wait();
-                if let Some(path) = running.askpass {
-                    let _ = fs::remove_file(path);
-                }
+        self.refresh();
+        if let Some(mut r) = self.procs.remove(name) {
+            let _ = r.child.kill();
+            let _ = r.child.wait();
+            r.drain_stderr();
+            self.outputs.insert(name.to_string(), r.output.clone());
+            if let Some(p) = r.askpass {
+                let _ = fs::remove_file(p);
             }
         }
         Ok(())
     }
 
     pub fn refresh_all(&mut self, names: &[String]) {
-        let names_copy: Vec<String> = names.to_vec();
-        for name in names_copy {
-            self.is_running(&name);
-        }
+        self.refresh();
+        let _ = names;
     }
+}
 
-    fn remove(&mut self, name: &str) {
-        if let Some(running) = self.procs.remove(name) {
-            if let Some(path) = running.askpass {
-                let _ = fs::remove_file(path);
+impl Running {
+    fn drain_stderr(&mut self) {
+        if let Some(mut stderr) = self.child.stderr.take() {
+            let mut buf = Vec::new();
+            if stderr.read_to_end(&mut buf).is_ok() {
+                let text = String::from_utf8_lossy(&buf);
+                if !text.trim().is_empty() {
+                    if !self.output.is_empty() {
+                        self.output.push('\n');
+                    }
+                    self.output.push_str(text.trim_end());
+                }
             }
         }
     }
@@ -266,6 +287,22 @@ pub fn build_ssh_command(tunnel: &Tunnel) -> Command {
     cmd.arg(target_arg);
 
     cmd
+}
+
+/// Render the exact ssh command that will be spawned, for display/debugging.
+pub fn format_command(tunnel: &Tunnel) -> String {
+    let cmd = build_ssh_command(tunnel);
+    let mut parts: Vec<String> = Vec::new();
+    parts.push(cmd.get_program().to_string_lossy().to_string());
+    for a in cmd.get_args() {
+        let a = a.to_string_lossy().to_string();
+        if a.contains(' ') {
+            parts.push(format!("\"{}\"", a.replace('"', "\\\"")));
+        } else {
+            parts.push(a);
+        }
+    }
+    parts.join(" ")
 }
 
 fn jump_string(jump: &JumpHost) -> String {
