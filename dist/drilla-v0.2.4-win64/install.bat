@@ -28,10 +28,16 @@ copy /y "%~dp0drll.cmd" "%INSTALL_DIR%\drll.cmd" >nul
 
 REM Add install dir to the user PATH (permanent) if not already there,
 REM so "drilla" and "drll" work from any new terminal.
-echo %PATH% | findstr /i "%INSTALL_DIR%" >nul
-if %errorlevel% neq 0 (
-    setx PATH "%INSTALL_DIR%;%PATH%" >nul
-)
+REM Do NOT use `setx PATH "%INSTALL_DIR%;%PATH%"`: setx truncates values at
+REM 1024 chars and bakes the merged machine/user PATH into the user entry,
+REM which can silently wipe parts of your PATH. Use the registry API instead.
+set "DRILLA_INSTALL_DIR=%INSTALL_DIR%"
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$d = $env:DRILLA_INSTALL_DIR;" ^
+  "$cur = [Environment]::GetEnvironmentVariable('Path', 'User');" ^
+  "if ($cur -and ($cur.Split(';') -contains $d)) { exit 0 };" ^
+  "$new = if ([string]::IsNullOrEmpty($cur)) { $d } else { $cur.TrimEnd(';') + ';' + $d };" ^
+  "[Environment]::SetEnvironmentVariable('Path', $new, 'User')"
 
 echo.
 echo Installed. Open a NEW terminal and run:  drilla   (or its alias:  drll)

@@ -4,11 +4,14 @@ An interactive terminal CLI for managing SSH tunnels on Windows (Linux support p
 
 ## Features
 
-- Interactive TUI (list tunnels, create/edit/delete, run/stop)
+- Interactive TUI (list tunnels, create/edit/duplicate/delete, run/stop)
 - Multiple jump hosts per tunnel (built into a `-J` proxy jump chain)
 - Password auth per jump host (and for direct tunnels) via SSH_ASKPASS
 - Local port forwarding
+- Folders: collapsible group headers in the list; created and managed right
+  from the tunnel list (`f` popup), not from the tunnel form
 - Vim-style navigation (`j`/`k`) and `/` incremental search
+- Selected-tunnel details pane (jumps, command, output) on the right
 - Config persisted to `~/.ssh/tunnels.json`
 
 ## Requirements
@@ -19,7 +22,7 @@ An interactive terminal CLI for managing SSH tunnels on Windows (Linux support p
 
 ## Install (end user, no cargo needed)
 
-1. Download `drilla-v0.2.1-win64.zip` from Releases.
+1. Download `drilla-v0.2.4-win64.zip` from Releases.
 2. Unzip and run `install.bat` (or just double-click `drilla.exe`).
 
 `install.bat` copies the exe to `%LOCALAPPDATA%\Programs\drilla` and adds it to
@@ -54,12 +57,14 @@ From the tunnel list:
 
 | Key | Action |
 |-----|--------|
-| `Enter` | Run / stop the selected tunnel |
-| `j` / `k` or arrows | Navigate |
+| `Enter` | Run / stop a tunnel; on a folder header, collapse / expand it |
+| `j` / `k` or arrows | Navigate (folder headers included) |
 | `/` | Search (match name, host, ports, jump hosts) |
+| `f` | Folder popup for the selected tunnel: assign a folder, `(none)`, or `(new…)`; `r` renames, `x` deletes the highlighted folder |
 | `n` | Create a new tunnel |
+| `c` | Duplicate the selected tunnel as `"name (copy)"` |
 | `e` | Edit the selected tunnel |
-| `d` | Delete the selected tunnel |
+| `d` | Delete the selected tunnel (confirm with `y`, cancel with `n`/`Esc`) |
 | `q` | Quit (saves config) |
 
 From the create/edit form (`Tab` cycles fields):
@@ -115,6 +120,7 @@ Stored at `~/.ssh/tunnels.json`:
   "tunnels": [
     {
       "name": "Production DB",
+      "folder": "prod",
       "jumps": [
         { "user": "alice", "host": "bastion1.example.com", "port": 22, "password": "s3cret" },
         { "user": "bob", "host": "bastion2.example.com", "port": 2222 }

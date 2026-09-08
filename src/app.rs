@@ -11,6 +11,7 @@ pub enum Screen {
     Edit,
     JumpAdd,
     JumpEdit,
+    Folder,
 }
 
 pub struct ListState {
@@ -30,7 +31,6 @@ impl ListState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputField {
     Name,
-    Folder,
     LocalPort,
     Jumps,
     TargetHost,
@@ -49,7 +49,6 @@ pub enum JumpField {
 
 pub struct FormState {
     pub name: String,
-    pub folder: String,
     pub local_port: String,
     pub target_host: String,
     pub target_port: String,
@@ -67,7 +66,6 @@ impl FormState {
     pub fn new_empty() -> Self {
         Self {
             name: String::new(),
-            folder: String::new(),
             local_port: String::new(),
             target_host: String::new(),
             target_port: String::new(),
@@ -85,7 +83,6 @@ impl FormState {
     pub fn from_tunnel(tunnel: &Tunnel, index: usize) -> Self {
         Self {
             name: tunnel.name.clone(),
-            folder: tunnel.folder.clone(),
             local_port: tunnel.local_port.to_string(),
             target_host: tunnel.target.host.clone(),
             target_port: tunnel.target.port.to_string(),
@@ -100,7 +97,7 @@ impl FormState {
         }
     }
 
-    pub fn to_tunnel(&self) -> Result<Tunnel, String> {
+    pub fn to_tunnel(&self, folder: String) -> Result<Tunnel, String> {
         let name = self.name.trim().to_string();
         if name.is_empty() {
             return Err("Name is required".to_string());
@@ -125,8 +122,8 @@ impl FormState {
         };
         Ok(Tunnel {
             name,
+            folder,
             jumps: self.jumps.clone(),
-            folder: self.folder.trim().to_string(),
             target: Target {
                 host: target_host,
                 port: target_port,
@@ -139,8 +136,7 @@ impl FormState {
 
     pub fn cycle_input(&mut self) {
         self.input = match self.input {
-            InputField::Name => InputField::Folder,
-            InputField::Folder => InputField::LocalPort,
+            InputField::Name => InputField::LocalPort,
             InputField::LocalPort => InputField::Jumps,
             InputField::Jumps => InputField::TargetHost,
             InputField::TargetHost => InputField::TargetPort,
@@ -168,7 +164,7 @@ impl JumpFormState {
             host: String::new(),
             port: String::new(),
             password: String::new(),
-            input: JumpField::Host,
+            input: JumpField::User,
             error: None,
             edit_index: None,
         }
@@ -180,7 +176,7 @@ impl JumpFormState {
             host: jump.host.clone(),
             port: jump.port.to_string(),
             password: jump.password.clone().unwrap_or_default(),
-            input: JumpField::Host,
+            input: JumpField::User,
             error: None,
             edit_index: Some(index),
         }
@@ -214,10 +210,10 @@ impl JumpFormState {
 
     pub fn cycle_input(&mut self) {
         self.input = match self.input {
-            JumpField::Host => JumpField::User,
-            JumpField::User => JumpField::Port,
+            JumpField::User => JumpField::Host,
+            JumpField::Host => JumpField::Port,
             JumpField::Port => JumpField::Password,
-            JumpField::Password => JumpField::Host,
+            JumpField::Password => JumpField::User,
         };
     }
 }
@@ -255,6 +251,10 @@ pub struct App {
     pub search_mode: bool,
     // index (real tunnel idx) awaiting a y/N delete confirmation
     pub confirming_delete: Option<usize>,
+    // folder names currently collapsed in the list
+    pub collapsed: Vec<String>,
+    // open folder picker (assign/create/rename/delete), only set on Screen::Folder
+    pub folder_picker: Option<FolderPicker>,
 }
 
 /// One row of the tunnel list: either a folder group header or a tunnel.
@@ -262,6 +262,27 @@ pub struct App {
 pub enum ListRow {
     Header(String),
     Tunnel(usize),
+}
+
+/// Popup shown on the list to assign / create / rename / delete folders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FolderPicker {
+    /// Folder names (sorted, non-empty) shown as options 1..=folders.len().
+    pub folders: Vec<String>,
+    /// 0 = "(none)", 1..=folders.len() = a folder, folders.len()+1 = "(new…)".
+    pub selected: usize,
+    /// Real tunnel index the picker is assigning to.
+    pub target_tunnel: usize,
+    /// Set while typing a new folder name or renaming one.
+    pub editing: Option<EditKind>,
+    pub new_name: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditKind {
+    Create,
+    Rename(usize),
 }
 
 impl App {
@@ -286,6 +307,8 @@ pub fn new_with_store(store: ConfigStore) -> Self {
             search: String::new(),
             search_mode: false,
             confirming_delete: None,
+            collapsed: Vec::new(),
+            folder_picker: None,
         };
         app.snap_selection();
         app
@@ -295,6 +318,7 @@ pub fn new_with_store(store: ConfigStore) -> Self {
             Screen::List => self.handle_list_key(key),
             Screen::Create | Screen::Edit => self.handle_form_key(key),
             Screen::JumpAdd | Screen::JumpEdit => self.handle_jump_form_key(key),
+            Screen::Folder => self.handle_folder_key(key),
         }
     }
 
@@ -332,6 +356,7 @@ pub fn visible_tunnels(&self) -> Vec<usize> {
         });
         let mut rows: Vec<ListRow> = Vec::new();
         let mut current_folder: Option<String> = None;
+        let mut hiding = false; // inside a collapsed group
         for &idx in &vis {
             let folder = self.config.tunnels[idx].folder.trim().to_string();
             let changed = match &current_folder {
@@ -339,12 +364,16 @@ pub fn visible_tunnels(&self) -> Vec<usize> {
                 None => !folder.is_empty(),
             };
             if changed {
+                current_folder = Some(folder.clone());
+                hiding = false;
                 if !folder.is_empty() {
                     rows.push(ListRow::Header(folder.clone()));
+                    hiding = self.collapsed.contains(&folder);
                 }
-                current_folder = Some(folder);
             }
-            rows.push(ListRow::Tunnel(idx));
+            if !hiding {
+                rows.push(ListRow::Tunnel(idx));
+            }
         }
         rows
     }
@@ -381,20 +410,16 @@ pub fn visible_tunnels(&self) -> Vec<usize> {
         }
     }
 
-    /// Move the selection by `dir` rows, skipping folder Header rows.
+    /// Move the selection by `dir` rows (folder Header rows are selectable so
+    /// Enter can collapse/expand them).
     fn move_selection(&mut self, dir: i32) {
-        let rows = self.visible_rows();
-        let len = rows.len();
+        let len = self.visible_rows().len();
         if len == 0 {
             return;
         }
-        let mut i = self.list.selected as i32 + dir;
-        while i >= 0 && i < len as i32 {
-            if matches!(rows.get(i as usize), Some(ListRow::Tunnel(_))) {
-                self.list.selected = i as usize;
-                return;
-            }
-            i += dir;
+        let next = self.list.selected as i32 + dir;
+        if next >= 0 && next < len as i32 {
+            self.list.selected = next as usize;
         }
     }
 
@@ -457,20 +482,38 @@ fn handle_list_key(&mut self, key: crossterm::event::KeyEvent) {
                 self.search_mode = true;
             }
             KeyCode::Enter => {
-                if let Some(idx) = self.selected_tunnel() {
-                    let name = self.config.tunnels[idx].name.clone();
-                    if self.ssh.is_running(&name) {
-                        match self.ssh.stop(&name) {
-                            Ok(_) => self.status = Some(format!("Stopped '{name}'")),
-                            Err(e) => self.status = Some(format!("Error: {e}")),
+                match self.visible_rows().get(self.list.selected) {
+                    Some(ListRow::Header(folder)) => {
+                        let folder = folder.clone();
+                        if let Some(pos) = self.collapsed.iter().position(|f| *f == folder) {
+                            self.collapsed.remove(pos);
+                        } else {
+                            self.collapsed.push(folder);
                         }
-                    } else {
-                        let tunnel = self.config.tunnels[idx].clone();
-                        match self.ssh.start(&tunnel) {
-                            Ok(_) => self.status = Some(format!("Started '{name}'")),
-                            Err(e) => self.status = Some(format!("Error: {e}")),
+                        self.list.clamp(self.visible_rows().len());
+                    }
+                    Some(ListRow::Tunnel(idx)) => {
+                        let idx = *idx;
+                        let name = self.config.tunnels[idx].name.clone();
+                        if self.ssh.is_running(&name) {
+                            match self.ssh.stop(&name) {
+                                Ok(_) => self.status = Some(format!("Stopped '{name}'")),
+                                Err(e) => self.status = Some(format!("Error: {e}")),
+                            }
+                        } else {
+                            let tunnel = self.config.tunnels[idx].clone();
+                            match self.ssh.start(&tunnel) {
+                                Ok(_) => self.status = Some(format!("Started '{name}'")),
+                                Err(e) => self.status = Some(format!("Error: {e}")),
+                            }
                         }
                     }
+                    None => {}
+                }
+            }
+            KeyCode::Char('f') => {
+                if let Some(idx) = self.selected_tunnel() {
+                    self.open_folder_picker(idx);
                 }
             }
             KeyCode::Char('n') => {
@@ -511,6 +554,167 @@ fn handle_list_key(&mut self, key: crossterm::event::KeyEvent) {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Open the folder-assignment popup for the given tunnel.
+    fn open_folder_picker(&mut self, idx: usize) {
+        let mut picker = FolderPicker {
+            folders: Vec::new(),
+            selected: 0,
+            target_tunnel: idx,
+            editing: None,
+            new_name: String::new(),
+            error: None,
+        };
+        self.rebuild_picker_folders(&mut picker);
+        let current = self.config.tunnels[idx].folder.trim().to_string();
+        let pos = picker.folders.iter().position(|f| *f == current);
+        picker.selected = pos.map(|i| i + 1).unwrap_or(0);
+        self.folder_picker = Some(picker);
+        self.screen = Screen::Folder;
+    }
+
+    /// Recompute the sorted folder list in a picker from the current config.
+    fn rebuild_picker_folders(&self, picker: &mut FolderPicker) {
+        let mut folders: Vec<String> = self
+            .config
+            .tunnels
+            .iter()
+            .map(|t| t.folder.trim().to_string())
+            .filter(|f| !f.is_empty())
+            .collect();
+        folders.sort();
+        folders.dedup();
+        picker.folders = folders;
+    }
+
+    fn handle_folder_key(&mut self, key: crossterm::event::KeyEvent) {
+        let Some(mut picker) = self.folder_picker.clone() else {
+            self.screen = Screen::List;
+            return;
+        };
+        let last = picker.folders.len() + 1; // index of "(new…)"
+        let mut closed = false;
+
+        if picker.editing.is_some() {
+            match key.code {
+                KeyCode::Esc => {
+                    picker.editing = None;
+                    picker.error = None;
+                }
+                KeyCode::Backspace => {
+                    picker.new_name.pop();
+                }
+                KeyCode::Char(c) => {
+                    picker.new_name.push(c);
+                }
+                KeyCode::Enter => {
+                    let name = picker.new_name.trim().to_string();
+                    if name.is_empty() {
+                        picker.error = Some("Folder name is required".to_string());
+                    } else {
+                        match picker.editing {
+                            Some(EditKind::Create) => {
+                                self.config.tunnels[picker.target_tunnel].folder = name.clone();
+                                let _ = self.store.save(&self.config);
+                                self.status = Some(format!("Assigned tunnel to '{name}'"));
+                                closed = true;
+                            }
+                            Some(EditKind::Rename(old_idx)) => {
+                                let old = picker.folders.get(old_idx).cloned();
+                                if let Some(old) = old {
+                                    for t in &mut self.config.tunnels {
+                                        if t.folder == old {
+                                            t.folder = name.clone();
+                                        }
+                                    }
+                                    self.status = Some(format!("Renamed folder '{old}' -> '{name}'"));
+                                    let _ = self.store.save(&self.config);
+                                    self.rebuild_picker_folders(&mut picker);
+                                    picker.selected = picker
+                                        .folders
+                                        .iter()
+                                        .position(|f| *f == name)
+                                        .map(|i| i + 1)
+                                        .unwrap_or(0);
+                                }
+                                picker.editing = None;
+                                picker.error = None;
+                            }
+                            None => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        } else {
+            match key.code {
+                KeyCode::Esc => closed = true,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if picker.selected > 0 {
+                        picker.selected -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if picker.selected < last {
+                        picker.selected += 1;
+                    }
+                }
+                KeyCode::Char('r') => {
+                    if picker.selected >= 1 && picker.selected <= picker.folders.len() {
+                        picker.new_name = picker.folders[picker.selected - 1].clone();
+                        picker.editing = Some(EditKind::Rename(picker.selected - 1));
+                        picker.error = None;
+                    }
+                }
+                KeyCode::Char('x') => {
+                    if picker.selected >= 1 && picker.selected <= picker.folders.len() {
+                        let name = picker.folders[picker.selected - 1].clone();
+                        for t in &mut self.config.tunnels {
+                            if t.folder == name {
+                                t.folder.clear();
+                            }
+                        }
+                        self.status = Some(format!("Deleted folder '{name}'"));
+                        let _ = self.store.save(&self.config);
+                        self.rebuild_picker_folders(&mut picker);
+                        if picker.selected > picker.folders.len() {
+                            picker.selected = picker.folders.len();
+                        }
+                    }
+                }
+                KeyCode::Enter => {
+                    if picker.selected == last {
+                        picker.new_name.clear();
+                        picker.editing = Some(EditKind::Create);
+                        picker.error = None;
+                    } else {
+                        let folder = if picker.selected == 0 {
+                            String::new()
+                        } else {
+                            picker.folders[picker.selected - 1].clone()
+                        };
+                        self.config.tunnels[picker.target_tunnel].folder = folder.clone();
+                        let _ = self.store.save(&self.config);
+                        if folder.is_empty() {
+                            self.status = Some("Removed tunnel from folders".to_string());
+                        } else {
+                            self.status = Some(format!("Assigned tunnel to '{folder}'"));
+                        }
+                        closed = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if closed {
+            self.folder_picker = None;
+            self.screen = Screen::List;
+            self.snap_selection();
+        } else {
+            self.folder_picker = Some(picker);
         }
     }
 
@@ -573,7 +777,6 @@ fn handle_list_key(&mut self, key: crossterm::event::KeyEvent) {
 match key.code {
                         KeyCode::Char(c) => match self.form.input {
                             InputField::Name => self.form.name.push(c),
-                            InputField::Folder => self.form.folder.push(c),
                             InputField::LocalPort => self.form.local_port.push(c),
                             InputField::TargetHost => self.form.target_host.push(c),
                             InputField::TargetPort => self.form.target_port.push(c),
@@ -584,9 +787,6 @@ match key.code {
                         KeyCode::Backspace => match self.form.input {
                             InputField::Name => {
                                 self.form.name.pop();
-                            }
-                            InputField::Folder => {
-                                self.form.folder.pop();
                             }
                             InputField::LocalPort => {
                                 self.form.local_port.pop();
@@ -665,7 +865,16 @@ match key.code {
     }
 
     fn save_form(&mut self) -> Result<(), String> {
-        let tunnel = self.form.to_tunnel()?;
+        let folder = if self.form.is_edit {
+            self.config
+                .tunnels
+                .get(self.form.edit_index)
+                .map(|t| t.folder.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let tunnel = self.form.to_tunnel(folder)?;
 
         if !self.form.is_edit {
             if self.config.tunnels.iter().any(|t| t.name == tunnel.name) {
@@ -724,9 +933,6 @@ fn temp_app(name: &str) -> App {
         // Name (contains letters that used to be intercepted: a, e, x)
         type_text(&mut app, "ProdAPI eu-1 a");
         assert_eq!(app.form.name, "ProdAPI eu-1 a");
-        app.handle_key(key(KeyCode::Tab)); // -> Folder
-        assert_eq!(app.form.input, InputField::Folder);
-        type_text(&mut app, "prod");
         app.handle_key(key(KeyCode::Tab)); // -> LocalPort
         assert_eq!(app.form.input, InputField::LocalPort);
         type_text(&mut app, "8443");
@@ -736,11 +942,11 @@ fn temp_app(name: &str) -> App {
 // Add jump #1 (with a password)
         app.handle_key(key(KeyCode::Char('a')));
         assert_eq!(app.screen, Screen::JumpAdd);
-        assert_eq!(app.jump_form.input, JumpField::Host);
-        type_text(&mut app, "bastion.example.com");
-        app.handle_key(key(KeyCode::Tab)); // -> User
         assert_eq!(app.jump_form.input, JumpField::User);
         type_text(&mut app, "alice");
+        app.handle_key(key(KeyCode::Tab)); // -> Host
+        assert_eq!(app.jump_form.input, JumpField::Host);
+        type_text(&mut app, "bastion.example.com");
         app.handle_key(key(KeyCode::Tab)); // -> Port
         assert_eq!(app.jump_form.input, JumpField::Port);
         type_text(&mut app, "2222");
@@ -756,10 +962,10 @@ fn temp_app(name: &str) -> App {
         // Add jump #2
         app.handle_key(key(KeyCode::Char('a')));
         assert_eq!(app.screen, Screen::JumpAdd);
-        type_text(&mut app, "bastion2.example.com");
-        app.handle_key(key(KeyCode::Tab));
         type_text(&mut app, "ops");
-        app.handle_key(key(KeyCode::Tab));
+        app.handle_key(key(KeyCode::Tab)); // -> Host
+        type_text(&mut app, "bastion2.example.com");
+        app.handle_key(key(KeyCode::Tab)); // -> Port
         type_text(&mut app, "22");
         app.handle_key(key(KeyCode::Enter)); // skip password
         assert_eq!(app.screen, Screen::Create);
@@ -794,7 +1000,7 @@ fn temp_app(name: &str) -> App {
 
         let t = &app.config.tunnels[0];
         assert_eq!(t.name, "ProdAPI eu-1 a");
-        assert_eq!(t.folder, "prod");
+        assert_eq!(t.folder, "");
         assert_eq!(t.local_port, 8443);
         assert_eq!(t.target.host, "api.internal.example.com");
         assert_eq!(t.legacy, true);
@@ -1067,5 +1273,159 @@ assert_eq!(t.target.port, 443);
                 "T:D",
             ]
         );
+    }
+
+    #[test]
+    fn folder_collapse_enter_toggles_hides_group() {
+        let mut app = temp_app("collapse");
+        app.config.tunnels = vec![
+            Tunnel {
+                name: "A".into(),
+                jumps: vec![],
+                target: Target { host: "h1".into(), port: 22, password: None },
+                local_port: 1,
+            folder: "prod".into(),
+            legacy: false,
+            },
+            Tunnel {
+                name: "B".into(),
+                jumps: vec![],
+                target: Target { host: "h2".into(), port: 22, password: None },
+                local_port: 2,
+            folder: "".into(),
+            legacy: false,
+            },
+            Tunnel {
+                name: "C".into(),
+                jumps: vec![],
+                target: Target { host: "h3".into(), port: 22, password: None },
+                local_port: 3,
+            folder: "prod".into(),
+            legacy: false,
+            },
+        ];
+        app.list.clamp(app.visible_rows().len());
+        app.snap_selection();
+        // rows: [T:B, H:prod, T:A, T:C]
+        assert_eq!(app.list.selected, 0);
+
+        // Move onto the "prod" header and collapse it.
+        app.handle_key(key(KeyCode::Char('j')));
+        assert_eq!(app.visible_rows()[app.list.selected], ListRow::Header("prod".into()));
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.collapsed, vec!["prod".to_string()]);
+        // Group hidden: only the header and the empty-folder tunnel remain.
+        let kinds: Vec<String> = app
+            .visible_rows()
+            .iter()
+            .map(|r| match r {
+                ListRow::Header(f) => format!("H:{f}"),
+                ListRow::Tunnel(i) => format!("T:{}", app.config.tunnels[*i].name),
+            })
+            .collect();
+        assert_eq!(kinds, vec!["T:B", "H:prod"]);
+
+        // Enter again expands the folder.
+        app.handle_key(key(KeyCode::Enter));
+        assert!(app.collapsed.is_empty());
+        assert_eq!(app.visible_rows().len(), 4);
+    }
+
+    #[test]
+    fn folder_picker_create_rename_assign_and_delete() {
+        fn select_tunnel(app: &mut App, name: &str) {
+            let rows = app.visible_rows();
+            let pos = rows
+                .iter()
+                .position(|r| {
+                    matches!(r, ListRow::Tunnel(i) if app.config.tunnels[*i].name == name)
+                })
+                .unwrap();
+            app.list.selected = pos;
+        }
+
+        let mut app = temp_app("folder_pick");
+        app.config.tunnels = vec![
+            Tunnel {
+                name: "One".into(),
+                jumps: vec![],
+                target: Target { host: "h1".into(), port: 22, password: None },
+                local_port: 1,
+            folder: "prod".into(),
+            legacy: false,
+            },
+            Tunnel {
+                name: "Two".into(),
+                jumps: vec![],
+                target: Target { host: "h2".into(), port: 22, password: None },
+                local_port: 2,
+            folder: "prod".into(),
+            legacy: false,
+            },
+        ];
+        app.list.clamp(app.visible_rows().len());
+        app.snap_selection();
+
+        // Open the picker on "One"; it highlights its current folder "prod".
+        select_tunnel(&mut app, "One");
+        app.handle_key(key(KeyCode::Char('f')));
+        assert_eq!(app.screen, Screen::Folder);
+        let p = app.folder_picker.as_ref().unwrap();
+        assert_eq!(p.folders, vec!["prod".to_string()]);
+        assert_eq!(p.selected, 1);
+        assert_eq!(p.target_tunnel, 0);
+
+        // Create and assign a new folder "staging" via "(new…)".
+        app.handle_key(key(KeyCode::Char('j'))); // -> (new…)
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.folder_picker.as_ref().unwrap().editing, Some(EditKind::Create));
+        type_text(&mut app, "staging");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.screen, Screen::List);
+        assert_eq!(app.config.tunnels[0].folder, "staging");
+        assert_eq!(app.config.tunnels[1].folder, "prod");
+
+        // Reopen on "One": current folder "staging" is highlighted.
+        select_tunnel(&mut app, "One");
+        app.handle_key(key(KeyCode::Char('f')));
+        let p = app.folder_picker.as_ref().unwrap();
+        assert_eq!(p.folders, vec!["prod".to_string(), "staging".to_string()]);
+        assert_eq!(p.selected, 2);
+
+        // Rename "prod" -> "lab"; both tunnels move with it.
+        app.handle_key(key(KeyCode::Char('k'))); // -> prod
+        app.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(app.folder_picker.as_ref().unwrap().editing, Some(EditKind::Rename(0)));
+        for _ in 0..4 {
+            app.handle_key(key(KeyCode::Backspace));
+        }
+        type_text(&mut app, "lab");
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.config.tunnels[1].folder, "lab");
+        let p = app.folder_picker.as_ref().unwrap();
+        assert_eq!(p.editing, None);
+        assert_eq!(p.folders, vec!["lab".to_string(), "staging".to_string()]);
+
+        // Delete "lab": tunnels fall back to no folder.
+        app.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(app.config.tunnels[1].folder, "");
+        assert_eq!(app.config.tunnels[0].folder, "staging");
+        assert_eq!(
+            app.folder_picker.as_ref().unwrap().folders,
+            vec!["staging".to_string()]
+        );
+
+        // Close, reopen on "One", and assign "(none)".
+        app.handle_key(key(KeyCode::Esc));
+        assert_eq!(app.screen, Screen::List);
+        select_tunnel(&mut app, "One");
+        app.handle_key(key(KeyCode::Char('f')));
+        // "One" is still in "staging", so it's highlighted.
+        assert_eq!(app.folder_picker.as_ref().unwrap().selected, 1);
+        app.handle_key(key(KeyCode::Char('k'))); // -> (none)
+        assert_eq!(app.folder_picker.as_ref().unwrap().selected, 0);
+        app.handle_key(key(KeyCode::Enter));
+        assert_eq!(app.screen, Screen::List);
+        assert_eq!(app.config.tunnels[0].folder, "");
     }
 }

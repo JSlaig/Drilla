@@ -40,6 +40,17 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             draw_jump_form(frame, app, chunks[0]);
             draw_status_bar(frame, chunks[1], &status_text);
         }
+        Screen::Folder => {
+            let list_chunks = Layout::new(Direction::Horizontal, [
+                Constraint::Min(24),
+                Constraint::Length(46),
+            ])
+            .split(chunks[0]);
+            draw_list(frame, app, list_chunks[0]);
+            draw_details(frame, app, list_chunks[1]);
+            draw_list_hints(frame, chunks[1], &status_text);
+            draw_folder_picker(frame, app, chunks[0]);
+        }
     }
 }
 
@@ -91,12 +102,114 @@ fn draw_details(frame: &mut Frame, app: &mut App, area: Rect) {
 
 fn draw_list_hints(frame: &mut Frame, area: Rect, status: &str) {
     let hints = Paragraph::new(format!(
-        "Enter: run/stop | j/k: nav | /: search | n: new | c: duplicate | e: edit | d: delete | q: quit\n{}",
+        "Enter: run/stop or collapse folder | j/k: nav | /: search | n: new | c: duplicate | e: edit | d: delete | f: folder | q: quit\n{}",
         status
     ))
     .style(Style::default().fg(Color::DarkGray))
     .alignment(Alignment::Center);
     frame.render_widget(hints, area);
+}
+
+fn draw_folder_picker(frame: &mut Frame, app: &App, area: Rect) {
+    let Some(picker) = &app.folder_picker else {
+        return;
+    };
+    let title = if picker.editing.is_some() {
+        match picker.editing {
+            Some(crate::app::EditKind::Create) => " New folder ",
+            Some(crate::app::EditKind::Rename(_)) => " Rename folder ",
+            None => " Folders ",
+        }
+    } else {
+        " Folders "
+    };
+    let popup_area = centered_rect(area, 40, 46);
+    let block = Block::default()
+        .title(title)
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .title_alignment(Alignment::Center);
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    if let Some(crate::app::EditKind::Create) | Some(crate::app::EditKind::Rename(_)) =
+        picker.editing
+    {
+        let label = match picker.editing {
+            Some(crate::app::EditKind::Create) => "Name",
+            Some(crate::app::EditKind::Rename(_)) => "New name",
+            None => "",
+        };
+        let mut text = format!("{}: {}_\n", label, picker.new_name);
+        if let Some(err) = &picker.error {
+            text.push_str(&format!("Error: {err}"));
+        }
+        let para = Paragraph::new(text).style(Style::default().fg(Color::Yellow));
+        frame.render_widget(para, Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: inner.height,
+        });
+        return;
+    }
+
+    let mut items: Vec<ListItem> = Vec::new();
+    let entries: Vec<String> = {
+        let mut v = vec!["(none)".to_string()];
+        v.extend(picker.folders.iter().cloned());
+        v.push("(new…)".to_string());
+        v
+    };
+    for (i, entry) in entries.iter().enumerate() {
+        let style = if i == picker.selected {
+            Style::default().bg(Color::Blue).fg(Color::White)
+        } else {
+            Style::default()
+        };
+        let suffix = match i {
+            0 => String::new(),
+            n if n == picker.folders.len() + 1 => String::new(),
+            n => {
+                let count = app
+                    .config
+                    .tunnels
+                    .iter()
+                    .filter(|t| t.folder.trim() == picker.folders[n - 1])
+                    .count();
+                format!(" ({count})")
+            }
+        };
+        items.push(ListItem::new(format!("{}{}", entry, suffix)).style(style));
+    }
+    let list = ratatui::widgets::List::new(items);
+    frame.render_widget(list, inner);
+
+    let hint = Paragraph::new("Enter: assign | r: rename | x: delete | Esc: back")
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
+    frame.render_widget(hint, Rect {
+        x: inner.x,
+        y: inner.y + inner.height - 1,
+        width: inner.width,
+        height: 1,
+    });
+}
+
+fn centered_rect(area: Rect, height: u16, width: u16) -> Rect {
+    let vertical = Layout::new(Direction::Vertical, [
+        Constraint::Percentage((100 - height) / 2),
+        Constraint::Length(height),
+        Constraint::Percentage((100 - height) / 2),
+    ])
+    .split(area);
+    let horizontal = Layout::new(Direction::Horizontal, [
+        Constraint::Percentage((100 - width) / 2),
+        Constraint::Length(width),
+        Constraint::Percentage((100 - width) / 2),
+    ])
+    .split(vertical[1]);
+    horizontal[1]
 }
 
 fn draw_status_bar(frame: &mut Frame, area: Rect, text: &str) {
@@ -151,7 +264,15 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
                         .fg(Color::DarkGray)
                         .add_modifier(Modifier::BOLD)
                 };
-                let label = format!(" {} ", folder);
+                let collapsed = app.collapsed.contains(folder);
+                let count = app
+                    .config
+                    .tunnels
+                    .iter()
+                    .filter(|t| t.folder.trim() == *folder)
+                    .count();
+                let arrow = if collapsed { "▸" } else { "▾" };
+                let label = format!(" {} {} ({})", arrow, folder, count);
                 rows_widgets.push(
                     Row::new(vec![
                         String::new(),
@@ -256,9 +377,9 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
     draw_input(
         frame,
         top[1],
-        "Folder (optional)",
-        &form.folder,
-        form.input == InputField::Folder,
+        "Local Port",
+        &form.local_port,
+        form.input == InputField::LocalPort,
     );
 
     // Jumps list
@@ -322,29 +443,21 @@ fn draw_form(frame: &mut Frame, app: &App, area: Rect) {
     .split(chunks[2]);
 
     let target_top = Layout::new(Direction::Horizontal, [
-        Constraint::Percentage(25),
-        Constraint::Percentage(55),
-        Constraint::Percentage(20),
+        Constraint::Percentage(60),
+        Constraint::Percentage(40),
     ])
     .split(bottom[0]);
 
     draw_input(
         frame,
         target_top[0],
-        "Local Port",
-        &form.local_port,
-        form.input == InputField::LocalPort,
-    );
-    draw_input(
-        frame,
-        target_top[1],
         "Target Host",
         &form.target_host,
         form.input == InputField::TargetHost,
     );
     draw_input(
         frame,
-        target_top[2],
+        target_top[1],
         "Target Port",
         &form.target_port,
         form.input == InputField::TargetPort,

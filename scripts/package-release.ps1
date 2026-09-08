@@ -12,7 +12,7 @@ if (-not (Test-Path "target\release\drilla.exe")) {
 }
 
 $dist = Join-Path $PSScriptRoot "..\dist"
-$version = "0.2.3"
+$version = "0.2.4"
 $exeName = "drilla-v$version-win64"
 $pkgDir = Join-Path $dist $exeName
 
