@@ -110,7 +110,7 @@ impl SshManager {
             .env("DRILLA_ASKPASS_MODE", "1")
             .env("DRILLA_ASKPASS_FILE", &path);
 
-        // For legacy tunnels, the nested `-J` hops and the login host must see
+        // For legacy tunnels, every SSH hop must see
         // the legacy host-key/algo options. They ignore command-line -o, but
         // read ~/.ssh/config — so stage a managed Host block for this tunnel.
         if tunnel.legacy {
@@ -336,7 +336,7 @@ pub fn default_config_path() -> PathBuf {
     }
 }
 
-/// Hosts that are reached over SSH for this tunnel (jump hosts + login host).
+/// Hosts that are reached over SSH for this tunnel (all jump hosts).
 fn tunnel_ssh_hosts(tunnel: &Tunnel) -> Vec<String> {
     let mut hosts: Vec<String> = Vec::new();
     for j in &tunnel.jumps {
@@ -344,13 +344,8 @@ fn tunnel_ssh_hosts(tunnel: &Tunnel) -> Vec<String> {
             hosts.push(j.host.clone());
         }
     }
-    let login_host = if tunnel.jumps.is_empty() {
-        tunnel.target.host.clone()
-    } else {
-        tunnel.jumps[0].host.clone()
-    };
-    if !hosts.contains(&login_host) {
-        hosts.push(login_host);
+    if tunnel.jumps.is_empty() && !tunnel.target.host.is_empty() {
+        hosts.push(tunnel.target.host.clone());
     }
     hosts
 }
@@ -530,14 +525,15 @@ pub fn build_ssh_command(tunnel: &Tunnel) -> Command {
         cmd.arg(o);
     }
 
-    if !tunnel.jumps.is_empty() {
-        // Standard, well-tested `-J` for every tunnel. For legacy tunnels the
+    if tunnel.jumps.len() > 1 {
+        // Standard, well-tested `-J` for the intermediary jumps. For legacy tunnels the
         // legacy host-key/algo options are carried into the nested `-J` hops via
         // the managed ~/.ssh/config block (prepare_legacy_config); nested ssh
         // processes read the config file, not command-line -o options.
         let jumps: Vec<String> = tunnel
             .jumps
             .iter()
+            .take(tunnel.jumps.len() - 1)
             .map(jump_string)
             .collect();
         cmd.arg("-J").arg(jumps.join(","));
@@ -556,7 +552,18 @@ pub fn build_ssh_command(tunnel: &Tunnel) -> Command {
     );
     cmd.arg(forward);
 
-    let target_arg = build_login(tunnel.jumps.first(), &tunnel.target.host);
+    // The final jump is the SSH login host. Earlier jumps only transport that
+    // connection; using the first jump as both proxy and destination creates a
+    // self-referential ProxyJump chain.
+    // `-J` owns the ports of intermediary jumps; `-p` sets the login host.
+    let target_port = tunnel
+        .jumps
+        .last()
+        .map(|jump| jump.port)
+        .filter(|&port| port != 0)
+        .unwrap_or(22);
+    cmd.arg("-p").arg(target_port.to_string());
+    let target_arg = build_login(tunnel.jumps.last(), &tunnel.target.host);
     cmd.arg(target_arg);
 
     cmd
@@ -641,9 +648,11 @@ mod tests {
                 "-o",
                 "ConnectTimeout=15",
                 "-J",
-                "alice@jump1.example.com,bob@jump2.example.com:2222,jump3.example.com",
+                "alice@jump1.example.com,bob@jump2.example.com:2222",
                 "-L5433:db.internal:5432",
-                "alice@jump1.example.com"
+                "-p",
+                "22",
+                "jump3.example.com"
             ]
         );
     }
@@ -669,7 +678,13 @@ mod tests {
         let args = cmd_to_args(&build_ssh_command(&tunnel));
         // Like non-legacy, a legacy tunnel with jumps uses standard -J...
         assert!(args.contains(&"-J".to_string()));
-        assert!(args.contains(&"alice@jump1.example.com,bob@jump2.example.com:2222".to_string()));
+        assert!(args.contains(&"alice@jump1.example.com".to_string()));
+        assert!(!args.contains(&"alice@jump1.example.com,bob@jump2.example.com:2222".to_string()));
+        assert!(args.ends_with(&[
+            "-p".to_string(),
+            "2222".to_string(),
+            "bob@jump2.example.com".to_string(),
+        ]));
         // ...keeps the legacy -o options on the parent command too...
         assert!(args.contains(&"HostKeyAlgorithms=+ssh-rsa,ssh-dss".to_string()));
         // ...and auto-accepts host keys so changed keys never block it.
@@ -678,10 +693,35 @@ mod tests {
         assert!(!args.contains(&"StrictHostKeyChecking=accept-new".to_string()));
 
         // The nested -J hops read the managed config block, which must cover
-        // every hop host (jump1, jump2) plus the login host (jump1).
+        // every hop host (jump1, jump2).
         let hosts = tunnel_ssh_hosts(&tunnel);
         assert!(hosts.contains(&"jump1.example.com".to_string()));
         assert!(hosts.contains(&"jump2.example.com".to_string()));
+    }
+
+    #[test]
+    fn one_jump_is_the_login_host_not_its_own_proxy() {
+        let tunnel = Tunnel {
+            name: "one-hop".into(),
+            jumps: vec![jump("alice", "bastion.example.com", 2222, None)],
+            target: Target {
+                host: "db.internal".into(),
+                port: 5432,
+                password: None,
+            },
+            local_port: 5433,
+            folder: "".into(),
+            legacy: false,
+        };
+
+        let args = cmd_to_args(&build_ssh_command(&tunnel));
+        assert!(!args.contains(&"-J".to_string()));
+        assert!(args.contains(&"-L5433:db.internal:5432".to_string()));
+        assert!(args.ends_with(&[
+            "-p".to_string(),
+            "2222".to_string(),
+            "alice@bastion.example.com".to_string(),
+        ]));
     }
 
     #[test]
